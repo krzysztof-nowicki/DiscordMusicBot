@@ -1,0 +1,7 @@
+node_modules/
+.node/
+bin/
+data/
+.env
+*.log
+.idea/
