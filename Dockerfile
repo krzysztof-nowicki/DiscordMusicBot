@@ -7,9 +7,10 @@ FROM node:24-bookworm-slim
 # yt-dlp release tag ("latest" or e.g. 2026.10.01). tools.js still self-updates it at runtime into BIN_DIR.
 ARG YTDLP_VERSION=latest
 
-# ffmpeg (decode + Opus encode) and CA certs for HTTPS; curl only for the download below.
+# ffmpeg (decode + Opus encode), CA certs for HTTPS, tini (PID 1: reaps zombie ffmpeg/yt-dlp children, forwards
+# SIGTERM); curl only for the download below.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates tini curl \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -46,8 +47,10 @@ ENV NODE_ENV=production \
 RUN chown -R node:node /app/bin /app/data /app/cache
 USER node
 
-# Liveness: the bot rewrites DATA_DIR/heartbeat every 30 s while connected to Discord.
+# Liveness: the bot rewrites DATA_DIR/heartbeat every 30 s while connected to Discord
+# (falls back to the temp dir if DATA_DIR is not writable; healthcheck.js checks both).
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 CMD ["node", "src/healthcheck.js"]
 
-# SIGTERM is handled by the bot: leaves voice, kills ffmpeg/yt-dlp.
+# SIGTERM is handled by the bot (leaves voice, kills ffmpeg/yt-dlp); tini forwards it and reaps orphans.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "src/index.js"]

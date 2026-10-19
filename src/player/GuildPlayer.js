@@ -89,6 +89,7 @@ export class GuildPlayer extends EventEmitter {
     /** @type {any|null} */ this.current = null;
     this.resource = null;
     this.handle = null; // { stream, type, kill } of the current track
+    this.abort = null; // AbortController of the current start (cancels a pending createStream on skip/stop)
     this.streamVolume = null; // volume baked into the current ogg/opus stream
     this.startOffset = 0; // seconds: where the current resource started (seek)
     /** @type {null|'user'|'alone'} why playback is paused (alone = auto-resume when someone comes back) */
@@ -141,6 +142,7 @@ export class GuildPlayer extends EventEmitter {
     this.connection = connection;
     this.channelId = channelId;
     connection.subscribe(this.player);
+    if (!this.current) this._armIdle(); // connected but nothing queued yet: don't hold a player slot forever
   }
 
   // ---------------------------------------------------------------- queue operations
@@ -309,7 +311,7 @@ export class GuildPlayer extends EventEmitter {
   setVolume(v) {
     this.volume = Math.max(0, Math.min(200, Math.round(v)));
     if (this.resource?.volume) this.resource.volume.setVolume(this.volume / 100);
-    else if (this.current && !this.suspended) this._scheduleVolumeRestart();
+    else if (this.resource) this._scheduleVolumeRestart(); // ogg/opus; a stream still opening is checked in _start
     this.settings?.set(this.guildId, { volume: this.volume });
     this.emit('update');
     return this.volume;
@@ -367,8 +369,7 @@ export class GuildPlayer extends EventEmitter {
     this._clearTimer('volume');
     this.timers.volume = this._timer(VOLUME_RESTART_MS, () => {
       this.timers.volume = null;
-      if (!this.current || this.destroyed || this.suspended) return;
-      if (!this.resource) return this._scheduleVolumeRestart(); // still opening: try again shortly
+      if (!this.current || this.destroyed || this.suspended || !this.resource) return;
       if (this.resource.volume || this.streamVolume === this.volume) return;
       this._start(this.current, this.current.isLive ? 0 : this.position(), { restart: true, keepPause: true });
     });
@@ -392,6 +393,8 @@ export class GuildPlayer extends EventEmitter {
     this.token++;
     this._clearTimer('prefetch');
     this._clearTimer('volume');
+    this.abort?.abort();
+    this.abort = null;
     this.resource = null;
     const h = this.handle;
     this.handle = null;
@@ -425,16 +428,19 @@ export class GuildPlayer extends EventEmitter {
     if (!stayPaused) this._clearPause();
     this._halt();
     const token = this.token;
+    const ac = new AbortController();
+    this.abort = ac;
     this.current = track;
     this.startOffset = seekSec;
     this.lastError = null;
     this._clearTimer('idle');
 
+    const volume = this.volume; // what the stream is created with (ogg/opus bakes it in)
     let handle;
     try {
-      handle = await this.sources.createStream(track, { seekSec, volume: this.volume / 100 });
+      handle = await this.sources.createStream(track, { seekSec, volume: volume / 100, signal: ac.signal });
     } catch (e) {
-      if (token !== this.token || this.destroyed) return;
+      if (token !== this.token || this.destroyed || ac.signal.aborted) return;
       this.log(`[player] createStream failed for ${track.id}: ${e.detail || e.message}`);
       this._failed(track, e);
       return;
@@ -444,7 +450,8 @@ export class GuildPlayer extends EventEmitter {
       return;
     }
     this.handle = handle;
-    if (handle.fallbackFrom && !track.fallbackFrom) track.fallbackFrom = handle.fallbackFrom;
+    if (handle.fallback && !track.fallback) Object.assign(track, { fallback: handle.fallback, fallbackFrom: handle.fallbackFrom });
+    else if (handle.fallbackFrom && !track.fallbackFrom) track.fallbackFrom = handle.fallbackFrom;
     handle.stream.on?.('error', (e) => this.log(`[player] stream error (${track.id}): ${e.message}`));
     let resource;
     try {
@@ -455,10 +462,13 @@ export class GuildPlayer extends EventEmitter {
       return;
     }
     resource.volume?.setVolume(this.volume / 100);
-    this.streamVolume = resource.volume ? null : this.volume;
+    this.streamVolume = resource.volume ? null : volume;
     this.resource = resource;
     this.player.play(resource);
-    if (stayPaused && this.pauseReason) this.player.pause(true);
+    // Paused (by the user or by being alone) while the stream was opening: honour it now.
+    if (this.pauseReason) this.player.pause(true);
+    // Volume changed while an ogg/opus stream was opening: re-create it with the new volume.
+    if (this.streamVolume !== null && this.streamVolume !== this.volume) this._scheduleVolumeRestart();
     if (!restart) this.emit('trackStart', track);
     else this.emit('update');
     this._schedulePrefetch();

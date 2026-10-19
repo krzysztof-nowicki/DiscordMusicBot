@@ -13,6 +13,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from './config.js';
+import { SourceError } from './sources/track.js';
 
 const WIN = process.platform === 'win32';
 const EXE = WIN ? '.exe' : '';
@@ -63,11 +64,22 @@ export const ytdlpProfile = {
 };
 
 /** Counting semaphore for yt-dlp extraction processes (tiny cloud CPUs: keep them sequential). */
-class Slots {
+export class Slots {
   constructor(n) { this.n = n; this.busy = 0; this.q = []; }
-  async acquire() {
-    if (this.busy < this.n) { this.busy++; return; }
-    await new Promise((r) => this.q.push(r));
+  /** Wait for a slot. Rejects with SourceError('ABORTED') if `signal` aborts first (the waiter leaves the queue). */
+  acquire(signal) {
+    if (signal?.aborted) return Promise.reject(new SourceError('ABORTED', 'aborted before acquire'));
+    if (this.busy < this.n) { this.busy++; return Promise.resolve(); }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const i = this.q.indexOf(waiter);
+        if (i >= 0) this.q.splice(i, 1);
+        reject(new SourceError('ABORTED', 'aborted while queued'));
+      };
+      const waiter = () => { signal?.removeEventListener('abort', onAbort); resolve(); };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.q.push(waiter);
+    });
   }
   /** Low-priority work (autocomplete): only if a slot is free right now. */
   tryAcquire() {
@@ -114,6 +126,7 @@ export function killTree(child) {
 /** Run a process to completion. Kills the whole tree on timeout/abort. */
 export function run(cmd, args, { timeoutMs = 60_000, signal } = {}) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return resolve({ code: null, timedOut: false, aborted: true, stdout: '', stderr: '' }); // never spawn
     let child;
     try {
       child = spawnTool(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });

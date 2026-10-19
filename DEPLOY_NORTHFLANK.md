@@ -104,18 +104,20 @@ The bot touches a heartbeat file every 30 s while it's connected to Discord, and
 ## 8. Check the logs
 Service → **Logs**. A healthy start looks like:
 ```
-[tools] yt-dlp 2026.xx.xx ready (node JS runtime)
-[bot] Logged in as MusicBot#1234 — 1 server(s), commands registered
+[tools] yt-dlp 2026.08.19, js runtime node:/usr/local/bin/node, ffmpeg ffmpeg
+logged in as MusicBot#1234 (1 servers)
+slash commands registered in guild 123456789012345678
 ```
-Every 10 min you'll see a resource line (RSS MB, active players). It should stay well under 512 MB.
+Every 10 minutes the bot logs a resource line such as `[res] rss=85MB heap=30MB players=1/3 uptime=…`. RSS should
+stay well under 512 MB. In a test with the same limits (0.2 CPU / 512 MB) it used 50–90 MB.
 
 ## 9. First test in Discord (it also proves UDP voice works)
 1. Join a voice channel on your server.
 2. Type `/play` and choose the **query** option, e.g. `never gonna give you up`.
 3. You should hear music within a few seconds and see a **Now playing** card with buttons.
-4. If the bot joins but you hear nothing, check the logs. Errors such as `UDP`, `IP discovery` or `VoiceConnection
-   timed out` mean outbound UDP is blocked on this host. In that case run the bot on your PC (README.md) or on
-   another host.
+4. If the bot joins but you hear nothing, check the logs. If `[voice] stuck while connecting` or
+   `voice join failed: …` keeps repeating, outbound UDP is probably blocked on this host. In that case run the bot
+   on your PC (README.md) or on another host.
 
 ## 10. Updating
 - **Code changes:** commit and push to `main`. Northflank **rebuilds and redeploys automatically** (CI/CD is on by
@@ -143,7 +145,7 @@ The bot is tuned for a 0.2-vCPU box, and every limit below is an environment var
 | Symptom | Fix |
 |---|---|
 | Build fails at `npm ci` | Make sure `package-lock.json` is committed, then re-run the build. |
-| Logs: `DISCORD_TOKEN missing` | Add it to the secret group and restart (step 6). |
+| Logs: `DISCORD_TOKEN is missing.` | Add it to the secret group and restart (step 6). |
 | Slash commands don't appear | Set `GUILD_ID` (instant), or wait up to an hour for global commands. Re-invite the bot with the `applications.commands` scope (USAGE.md). |
 | `Sign in to confirm you're not a bot` | Add `YTDLP_COOKIES_B64` (step 6). Meanwhile tracks fall back to SoundCloud; the card shows "(z SoundCloud)". |
 | Audio stutters | The box is at its CPU limit. Play in one server at a time, or upgrade to nf-compute-50. |

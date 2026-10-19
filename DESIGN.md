@@ -117,7 +117,7 @@ fraction of a vCPU and 256–512 MB RAM until the research results arrive. Requi
     (`YT_FALLBACK=soundcloud|none`), with a user-visible note "(z SoundCloud)".
 - **Health:** when a `PORT` env var is set, serve `GET /health` → 200 with a JSON status (guilds, playing count,
   uptime). This is optional and only needed if the platform requires a port.
-- **Container:** a `Dockerfile` (node:24-bookworm-slim, apt `ffmpeg ca-certificates`, `yt-dlp_linux` + deno binaries,
+- **Container:** a `Dockerfile` (node:24-bookworm-slim, apt `ffmpeg ca-certificates`, `yt-dlp_linux` (no deno: yt-dlp uses Node as its JS runtime), tini as init,
   `npm ci --omit=dev`, non-root user, `CMD ["node","src/index.js"]`), plus `.dockerignore`.
 - **Shutdown:** handle SIGTERM gracefully: leave voice and kill streams.
 

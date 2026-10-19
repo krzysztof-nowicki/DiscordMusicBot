@@ -1,5 +1,6 @@
 // Local music library over MUSIC_DIR: recursive scan, tags via music-metadata, index cached in data/library.json
 // (entries re-read only when a file's mtime/size changes), accent-insensitive fuzzy search, folder listing.
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { parseFile } from 'music-metadata';
@@ -10,6 +11,35 @@ import { lev, norm, readJson, tokens, writeJson } from './util.js';
 export const LOCAL_EXT = new Set(['.mp3', '.flac', '.ogg', '.oga', '.opus', '.m4a', '.wav', '.aac', '.wma']);
 const RESCAN_AFTER_MS = 10 * 60_000;
 const INDEX_VERSION = 1;
+
+// ---------- which files may be played ----------
+const extraRoots = new Set();
+const isUnc = (p) => /^[\\/]{2}/.test(String(p));
+const cmpPath = process.platform === 'win32' ? (p) => p.toLowerCase() : (p) => p;
+function realOrNull(p) {
+  try { return fs.realpathSync.native(p); } catch { return null; }
+}
+/** Also allow files under `dir` (createLibrary() roots, tests). MUSIC_DIR is always allowed. */
+export function allowLocalRoot(dir) {
+  extraRoots.add(path.resolve(dir));
+}
+/**
+ * True only for an existing audio file (LOCAL_EXT) whose real path (symlinks resolved) is inside MUSIC_DIR or an
+ * allowed root. UNC paths are rejected without touching the network.
+ */
+export function isAllowedLocalFile(p) {
+  if (!p || isUnc(p) || !LOCAL_EXT.has(path.extname(String(p)).toLowerCase())) return false;
+  const real = realOrNull(p);
+  if (!real || isUnc(real)) return false;
+  for (const r of [config.musicDir, ...extraRoots]) {
+    if (isUnc(r)) continue;
+    const root = realOrNull(r);
+    if (!root) continue;
+    const rel = path.relative(cmpPath(root), cmpPath(real));
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return true;
+  }
+  return false;
+}
 
 /** "01. Main Title" -> "Main Title" */
 const cleanName = (f) => path.parse(f).name.replace(/^\s*\d{1,3}\s*[-._)]\s*/, '').replace(/_/g, ' ').trim();
@@ -170,7 +200,9 @@ class LocalLibrary {
 
   /** Track for a relative path or an absolute file path (also outside MUSIC_DIR). */
   async get(relOrAbs) {
+    if (!relOrAbs || isUnc(relOrAbs)) return null;
     if (path.isAbsolute(relOrAbs)) {
+      if (!isAllowedLocalFile(relOrAbs)) return null; // e.g. C:\Windows\win.ini, files outside MUSIC_DIR
       const st = await fsp.stat(relOrAbs).catch(() => null);
       if (!st?.isFile()) return null;
       const rel = toRel(this.root, relOrAbs);
@@ -192,5 +224,6 @@ export function getLibrary() {
 }
 /** For tests: a library over any folder with its own index file. */
 export function createLibrary(root, indexFile) {
+  allowLocalRoot(root);
   return new LocalLibrary(root, indexFile);
 }

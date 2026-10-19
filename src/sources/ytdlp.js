@@ -1,6 +1,6 @@
 // yt-dlp wrappers: metadata (-J / --flat-playlist), direct stream URL info, yt-dlp JSON -> Track.
 import { ensureTools, run, tools, ytdlpBaseArgs, ytdlpProfile, ytdlpSlots } from '../tools.js';
-import { makeTrack, SourceError } from './track.js';
+import { makeTrack, SourceError, throwIfAborted } from './track.js';
 
 /** Map yt-dlp error text to a SourceError. */
 export function ytdlpError(stderr, fallback = 'STREAM_FAILED') {
@@ -24,7 +24,7 @@ async function ytdlpJsonOnce(args, { timeoutMs, signal, errCode, retry }) {
     throw ytdlpError("ERROR: [youtube] simulated: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies");
   }
   const r = await run(tools.ytdlp, [...ytdlpBaseArgs({ retry }), ...args], { timeoutMs, signal });
-  if (r.aborted) throw new SourceError('STREAM_FAILED', 'aborted');
+  if (r.aborted) throw new SourceError('ABORTED', 'aborted');
   if (r.timedOut) throw new SourceError('NETWORK', `yt-dlp timed out: ${args.join(' ')}`);
   const out = r.stdout.trim();
   if (r.code !== 0 && !out) throw ytdlpError(r.stderr, errCode);
@@ -41,13 +41,20 @@ async function ytdlpJsonOnce(args, { timeoutMs, signal, errCode, retry }) {
  * A failed YouTube extraction is retried once with the retry player clients (tools.js ytdlpProfile).
  */
 export async function ytdlpJson(args, { timeoutMs = 30_000, signal, errCode, lowPriority = false } = {}) {
-  await ensureTools();
+  throwIfAborted(signal);
+  try {
+    await ensureTools();
+  } catch (e) {
+    throw new SourceError('TOOL_MISSING', e.message);
+  }
+  throwIfAborted(signal);
   if (lowPriority) {
     if (!ytdlpSlots.tryAcquire()) throw new SourceError('NETWORK', 'yt-dlp busy');
   } else {
-    await ytdlpSlots.acquire();
+    await ytdlpSlots.acquire(signal);
   }
   try {
+    throwIfAborted(signal);
     try {
       return await ytdlpJsonOnce(args, { timeoutMs, signal, errCode, retry: false });
     } catch (e) {
@@ -95,7 +102,7 @@ export function entryToTrack(e, parentExtractor) {
  * @param {string} url
  */
 export async function ytdlpResolve(url, { playlistLimit = 500, signal } = {}) {
-  const info = await ytdlpJson(['--flat-playlist', '-J', '--playlist-end', String(playlistLimit), url], { timeoutMs: 60_000, signal, errCode: 'UNAVAILABLE' });
+  const info = await ytdlpJson(['--flat-playlist', '-J', '--playlist-end', String(playlistLimit), '--', url], { timeoutMs: 60_000, signal, errCode: 'UNAVAILABLE' });
   if (info._type === 'playlist' || Array.isArray(info.entries)) {
     const tracks = (info.entries || [])
       .filter((e) => e && e.id && !/^\[(Private|Deleted)/i.test(e.title || ''))
@@ -112,7 +119,7 @@ export async function ytdlpResolve(url, { playlistLimit = 500, signal } = {}) {
  * @returns {Promise<{url: string, headers: Record<string,string>, protocol: string, isLive: boolean, expiresAt: number, info: object}>}
  */
 export async function ytdlpStreamInfo(pageUrl, { signal } = {}) {
-  const info = await ytdlpJson(['-f', ytdlpProfile.format, '--no-playlist', '-j', pageUrl], { timeoutMs: 45_000, signal });
+  const info = await ytdlpJson(['-f', ytdlpProfile.format, '--no-playlist', '-j', '--', pageUrl], { timeoutMs: 45_000, signal });
   const fmt = info.requested_formats?.[0] || info;
   if (!fmt.url) throw new SourceError('STREAM_FAILED', `no stream url for ${pageUrl}`);
   let expiresAt = Date.now() + 30 * 60_000;
@@ -132,7 +139,7 @@ export async function ytdlpStreamInfo(pageUrl, { signal } = {}) {
 
 /** SoundCloud search via yt-dlp "scsearchN:" (~2 s). */
 export async function soundcloudSearch(q, limit, signal, { lowPriority = false } = {}) {
-  const info = await ytdlpJson(['--flat-playlist', '-J', `scsearch${limit}:${q}`], { timeoutMs: 20_000, signal, errCode: 'NOT_FOUND', lowPriority });
+  const info = await ytdlpJson(['--flat-playlist', '-J', '--', `scsearch${limit}:${q}`], { timeoutMs: 20_000, signal, errCode: 'NOT_FOUND', lowPriority });
   return (info.entries || []).filter((e) => e?.id).map((e) => entryToTrack({ ...e, title: e.title || slugTitle(e.url) }, 'soundcloud'));
 }
 

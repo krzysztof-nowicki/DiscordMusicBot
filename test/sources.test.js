@@ -222,3 +222,102 @@ test('local library: recursive scan of tagged files, accent-insensitive fuzzy se
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---------- security / robustness regressions ----------
+
+test('local paths: only audio files inside MUSIC_DIR or library roots; UNC refused before any I/O', async () => {
+  const { isAllowedLocalFile } = await import('../src/sources/local.js');
+  const { createStream } = await import('../src/sources/stream.js');
+  const UNC = String.raw`\\evil-host\share\a.mp3`;
+  assert.deepEqual(detect(UNC), { kind: 'unsupported', q: UNC });
+  assert.equal(detect(`local:${UNC}`).kind, 'local'); // the prefix form is refused by local.get() below
+  assert.equal(detect('//evil-host/share/a.mp3').kind, 'unsupported');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dmb-root-'));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dmb-outside-'));
+  try {
+    const inside = path.join(root, 'ok.mp3');
+    const outside = path.join(outsideDir, 'secret.mp3');
+    const text = path.join(root, 'notes.txt');
+    for (const f of [inside, outside, text]) fs.writeFileSync(f, 'x');
+    const lib = createLibrary(root, path.join(root, 'idx.json'));
+    assert.equal(isAllowedLocalFile(inside), true);
+    assert.equal(isAllowedLocalFile(outside), false);
+    assert.equal(isAllowedLocalFile(text), false); // not audio
+    assert.equal(isAllowedLocalFile(path.join(root, '..', path.basename(outsideDir), 'secret.mp3')), false);
+    assert.equal(isAllowedLocalFile(UNC), false);
+    assert.equal(isAllowedLocalFile('//evil-host/share/a.mp3'), false);
+    const sys = process.platform === 'win32' ? String.raw`C:\Windows\win.ini` : '/etc/passwd';
+    assert.equal(isAllowedLocalFile(sys), false);
+    assert.equal(await lib.get(sys), null);
+    assert.equal(await lib.get(outside), null);
+    assert.equal(await lib.get(UNC), null);
+    assert.equal(await lib.get('../secret.mp3'), null);
+    assert.equal((await lib.get(inside))?.source, 'local');
+    for (const streamUrl of [sys, outside, UNC]) {
+      await assert.rejects(createStream(makeTrack({ id: 'local:x', title: 'x', source: 'local', streamUrl })), (e) => e.code === 'LOCAL_MISSING', streamUrl);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test('radio playlists: self-referencing .m3u stops at depth 2; huge bodies are capped', async () => {
+  const http = await import('node:http');
+  const { resolve } = await import('../src/sources/resolve.js');
+  let hits = 0;
+  const server = http.createServer((req, res) => {
+    hits++;
+    if (req.url.startsWith('/loop')) {
+      res.writeHead(200, { 'content-type': 'audio/x-mpegurl' });
+      res.end(`#EXTM3U\nhttp://127.0.0.1:${server.address().port}/loop.m3u\n`);
+    } else {
+      res.writeHead(200, { 'content-type': 'audio/x-scpls' });
+      const junk = Buffer.alloc(64 * 1024, 'a');
+      let sent = 0;
+      const pump = () => { while (sent < 8 * 1024 * 1024 && res.write(junk)) sent += junk.length; if (sent < 8 * 1024 * 1024) res.once('drain', pump); else res.end('\nFile1=http://example.invalid/x\n'); };
+      res.on('close', () => { sent = Infinity; });
+      pump();
+    }
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const t0 = Date.now();
+    await assert.rejects(resolve(`${base}/loop.m3u`), (e) => e.code === 'UNSUPPORTED' && /too deep/.test(e.detail));
+    assert.ok(hits <= 3, `${hits} requests`);
+    await assert.rejects(resolve(`${base}/big.pls`), (e) => e.code === 'UNSUPPORTED' && /empty radio playlist/.test(e.detail));
+    assert.ok(Date.now() - t0 < 5000);
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
+});
+
+test('abort: Slots queue, run(), ytdlpJson, createStream, resolve honour AbortSignal', async () => {
+  const { Slots, run } = await import('../src/tools.js');
+  const { ytdlpJson } = await import('../src/sources/ytdlp.js');
+  const { createStream } = await import('../src/sources/stream.js');
+  const { resolve } = await import('../src/sources/resolve.js');
+  const slots = new Slots(1);
+  await slots.acquire();
+  const ac = new AbortController();
+  const queued = slots.acquire(ac.signal);
+  const later = slots.acquire(); // stays queued behind the aborted one
+  ac.abort();
+  await assert.rejects(queued, (e) => e.code === 'ABORTED');
+  slots.release(); // goes to `later`, not to the aborted waiter
+  await later;
+  assert.equal(slots.busy, 1);
+  slots.release();
+  assert.equal(slots.busy, 0);
+  await assert.rejects(slots.acquire(AbortSignal.abort()), (e) => e.code === 'ABORTED');
+  assert.equal(slots.busy, 0);
+
+  const aborted = AbortSignal.abort();
+  const r = await run('definitely-not-a-real-command', [], { signal: aborted }); // would reject with ENOENT if spawned
+  assert.equal(r.aborted, true);
+  await assert.rejects(ytdlpJson(['--', 'https://example.com'], { signal: aborted }), (e) => e.code === 'ABORTED');
+  await assert.rejects(createStream(makeTrack({ id: 'yt:x', title: 'x', source: 'youtube', url: 'https://youtu.be/x' }), { signal: aborted }), (e) => e.code === 'ABORTED');
+  await assert.rejects(resolve('anything', { signal: aborted }), (e) => e.code === 'ABORTED');
+});

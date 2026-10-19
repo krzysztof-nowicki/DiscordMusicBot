@@ -11,7 +11,8 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test \"test/*.test.js\"",
-    "test:live": "node --test \"test/live/*.test.js\""
+    "test:live": "node --test \"test/live/*.test.js\"",
+    "test:docker": "node test/run-in-docker.mjs"
   },
   "dependencies": {
     "@discordjs/voice": "0.19.2",

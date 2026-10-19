@@ -9,12 +9,14 @@
 //     pipe:   yt-dlp -o - | ffmpeg -i pipe:0   (protocols ffmpeg can't open itself, e.g. DASH segments)
 //   YouTube bot check ("confirm you're not a bot") -> SoundCloud match when YT_FALLBACK=soundcloud.
 import fs from 'node:fs';
+import { PassThrough } from 'node:stream';
 import path from 'node:path';
 import { config } from '../config.js';
 import { ensureTools, killTree, spawnTool, tools, ytdlpBaseArgs, ytdlpProfile } from '../tools.js';
 import { MIN_SCORE, rankCandidates } from './match.js';
 import { matchSpotifyToYoutube } from './spotify.js';
-import { SourceError } from './track.js';
+import { isAllowedLocalFile } from './local.js';
+import { SourceError, throwIfAborted } from './track.js';
 import { Lru } from './util.js';
 import { soundcloudSearch, ytdlpStreamInfo } from './ytdlp.js';
 
@@ -116,6 +118,7 @@ function classifyFfmpegError(stderr) {
  */
 function startPipeline({ ffArgs, ytdlpArgs, signal }) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new SourceError('ABORTED', 'aborted before spawn'));
     const procs = [];
     let ytdlp = null;
     if (ytdlpArgs) {
@@ -133,27 +136,33 @@ function startPipeline({ ffArgs, ytdlpArgs, signal }) {
       ytdlp.stdout.on('error', () => {});
       ff.stdin.on('error', () => {}); // EPIPE when ffmpeg exits first
     }
-    const stream = ff.stdout;
+    // What the caller gets: a PassThrough fed from ffmpeg's stdout once audio has started. It is never explicitly
+    // paused, so every consumer style works (pipe, for-await, and a plain on('data'), which would never resume a
+    // stream left explicitly paused by pause() + unshift()).
+    const src = ff.stdout;
+    const stream = new PassThrough({ highWaterMark: 64 * 1024 });
     let killed = false;
     let started = false;
     const kill = () => {
       if (killed) return;
       killed = true;
-      signal?.removeEventListener('abort', kill);
+      signal?.removeEventListener('abort', onAbort);
       for (const p of procs) killTree(p);
+      if (!src.destroyed) src.destroy();
       if (!stream.destroyed) stream.destroy();
     };
     const fail = (err) => { clearTimeout(timer); kill(); reject(err); };
+    const onAbort = () => (started ? kill() : fail(new SourceError('ABORTED', 'aborted while starting')));
     const timer = setTimeout(() => fail(new SourceError('NETWORK', `no audio after ${FIRST_DATA_TIMEOUT_MS} ms: ${stderr.trim()}`)), FIRST_DATA_TIMEOUT_MS);
-    signal?.addEventListener('abort', kill, { once: true });
-    if (signal?.aborted) return fail(new SourceError('STREAM_FAILED', 'aborted'));
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     for (const p of procs) p.on('error', (e) => (started ? kill() : fail(new SourceError('TOOL_MISSING', e.message))));
-    stream.once('data', (chunk) => {
+    src.once('data', (chunk) => {
       started = true;
       clearTimeout(timer);
-      stream.pause();
-      stream.unshift(chunk);
+      stream.write(chunk);
+      src.pipe(stream); // backpressure: src pauses while the PassThrough is full
+      src.once('error', () => kill());
       resolve({ stream, kill });
     });
     ff.on('close', (code) => {
@@ -177,10 +186,12 @@ async function ytdlpSourceStream(track, { seek, signal, out }) {
   const pageUrl = await pageUrlFor(track, signal);
   if (!pageUrl) throw new SourceError('UNSUPPORTED', `no url for ${track.id}`);
   for (let attempt = 0; attempt < 2; attempt++) {
+    throwIfAborted(signal);
     const info = await streamInfo(pageUrl, { signal, fresh: attempt > 0 });
+    throwIfAborted(signal);
     if (out.forcePipe || !DIRECT_PROTOCOLS.has(String(info.protocol).split('+')[0])) {
       // Pipe mode: yt-dlp downloads, ffmpeg decodes stdin.
-      const ytdlpArgs = [...ytdlpBaseArgs(), '-f', ytdlpProfile.format, '--no-playlist', '--quiet', '-o', '-', pageUrl];
+      const ytdlpArgs = [...ytdlpBaseArgs(), '-f', ytdlpProfile.format, '--no-playlist', '--quiet', '-o', '-', '--', pageUrl];
       return startPipeline({ ffArgs: ffmpegArgs({ ...out, input: 'pipe:0', seekSec: seek }), ytdlpArgs, signal });
     }
     try {
@@ -190,7 +201,7 @@ async function ytdlpSourceStream(track, { seek, signal, out }) {
       });
     } catch (e) {
       infoCache.delete(pageUrl);
-      if (attempt === 0 && !signal?.aborted && e.code !== 'TOOL_MISSING') continue; // expired/flaky URL: re-resolve once
+      if (attempt === 0 && !signal?.aborted && e.code !== 'TOOL_MISSING' && e.code !== 'ABORTED') continue; // expired/flaky URL: re-resolve once
       throw e;
     }
   }
@@ -229,18 +240,21 @@ async function soundcloudFallback(track, signal) {
  *                    fallback?: 'soundcloud', fallbackFrom?: 'youtube', fallbackTrack?: import('./track.js').Track}>}
  */
 export async function createStream(track, { seekSec = 0, volume = 1, signal, loudnorm = false, mode = config.audioMode, forcePipe = false } = {}) {
+  throwIfAborted(signal);
+  // Only audio files inside MUSIC_DIR (realpath, no UNC): a crafted or persisted Track can't open other files.
+  const file = track.source === 'local' ? localPath(track) : null;
+  if (file && !(isAllowedLocalFile(file) && fs.existsSync(file))) throw new SourceError('LOCAL_MISSING', file);
   try {
     await ensureTools();
   } catch (e) {
     throw new SourceError('TOOL_MISSING', e.message);
   }
+  throwIfAborted(signal);
   const seek = track.isLive ? 0 : Math.max(0, Math.floor(seekSec || 0));
   const out = { mode, volume, loudnorm, forcePipe };
   const type = mode === 'opus' ? 'ogg/opus' : 'raw';
 
   if (track.source === 'local') {
-    const file = localPath(track);
-    if (!fs.existsSync(file)) throw new SourceError('LOCAL_MISSING', file);
     return { ...(await startPipeline({ ffArgs: ffmpegArgs({ ...out, input: file, seekSec: seek }), signal })), type };
   }
   if (['http', 'radio', 'attachment'].includes(track.source)) {
@@ -256,6 +270,7 @@ export async function createStream(track, { seekSec = 0, volume = 1, signal, lou
   } catch (e) {
     const yt = track.source === 'youtube' || track.source === 'spotify';
     if (!(yt && e.code === 'BOT_CHECK' && config.ytFallback === 'soundcloud') || signal?.aborted) throw e;
+    throwIfAborted(signal);
     console.warn(`[sources] YouTube bot check for ${track.id}; trying SoundCloud`);
     const sc = await soundcloudFallback(track, signal).catch(() => null);
     if (!sc) throw e;

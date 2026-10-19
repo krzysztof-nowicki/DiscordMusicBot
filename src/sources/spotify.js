@@ -48,7 +48,12 @@ export function parseEmbedHtml(html) {
 }
 
 async function fetchEmbed(type, id, signal) {
-  const res = await fetchT(`https://open.spotify.com/embed/${type}/${id}`, { timeoutMs: 10_000, signal, headers: { 'user-agent': BROWSER_UA, 'accept-language': 'en' } });
+  const get = () => fetchT(`https://open.spotify.com/embed/${type}/${id}`, { timeoutMs: 10_000, signal, headers: { 'user-agent': BROWSER_UA, 'accept-language': 'en' } });
+  let res = await get();
+  if (res.status >= 500) { // occasional 502/504 from Spotify's edge: one retry
+    await new Promise((r) => setTimeout(r, 800));
+    res = await get();
+  }
   if (res.status === 404) throw new SourceError('NOT_FOUND', `spotify embed 404 ${type}/${id}`);
   if (!res.ok) throw new SourceError('NETWORK', `spotify embed HTTP ${res.status}`);
   return parseEmbedHtml(await res.text());

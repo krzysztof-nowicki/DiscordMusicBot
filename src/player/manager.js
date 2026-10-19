@@ -81,7 +81,7 @@ export class PlayerManager {
     });
     let connection;
     try {
-      connection = await this.join(channel, { log, onGone: () => p.destroy(t('disconnected')) });
+      connection = await this.join(channel, this._joinOpts(p, guild, log));
     } catch (e) {
       log(`voice join failed: ${e.message}`);
       p.destroy(null);
@@ -91,6 +91,50 @@ export class PlayerManager {
     this.players.set(guild.id, p);
     p.checkAlone();
     return p;
+  }
+
+  /**
+   * Callbacks for voice.js. onGone only acts for the player's *current* connection, so a failed first join (not yet
+   * attached) posts just the joinFailed reply, and a connection replaced by _recreate() is ignored.
+   */
+  _joinOpts(p, guild, log) {
+    return {
+      log,
+      onGone: (conn) => {
+        if (p.connection === conn) p.destroy(t('disconnected'));
+      },
+      onDaveBroken: () => this._recreate(p, guild, log),
+    };
+  }
+
+  /** Destroy and recreate the voice connection (DAVE broken). Queue and position survive: the AudioPlayer auto-pauses
+   * without a subscriber and resumes when the new connection subscribes. */
+  async _recreate(p, guild, log) {
+    if (p.destroyed || p.recreating) return;
+    p.recreating = true;
+    const old = p.connection;
+    p.connection = null; // its Destroyed event must not tear the player down
+    try {
+      old?.destroy();
+    } catch {
+      /* already destroyed */
+    }
+    try {
+      const channel = guild.channels?.cache?.get(p.channelId);
+      if (!channel) throw new Error('voice channel no longer available');
+      const conn = await this.join(channel, this._joinOpts(p, guild, log));
+      if (p.destroyed) {
+        conn.destroy();
+        return;
+      }
+      p.attach(conn, channel.id);
+      log('[voice] connection recreated after DAVE failures');
+    } catch (e) {
+      log(`[voice] recreate failed: ${e.message}`);
+      p.destroy(t('disconnected'));
+    } finally {
+      p.recreating = false;
+    }
   }
 
   _post(p, content) {

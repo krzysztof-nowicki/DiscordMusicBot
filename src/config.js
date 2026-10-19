@@ -15,7 +15,8 @@ const num = (k, d) => {
 export const config = {
   token: env('DISCORD_TOKEN'),
   guildId: env('GUILD_ID'),
-  lang: env('LANG_BOT', env('LANG', 'pl')).startsWith('en') ? 'en' : 'pl',
+  // Only LANG_BOT: the shell's LANG (e.g. en_US.UTF-8 on Linux hosts) must not switch the bot's language.
+  lang: env('LANG_BOT', 'pl').startsWith('en') ? 'en' : 'pl',
   musicDir: env('MUSIC_DIR', path.join(os.homedir(), 'Music')),
   spotify: { clientId: env('SPOTIFY_CLIENT_ID'), clientSecret: env('SPOTIFY_CLIENT_SECRET') },
   djRole: env('DJ_ROLE'),

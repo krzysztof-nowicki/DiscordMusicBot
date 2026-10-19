@@ -13,6 +13,7 @@ const SP_ID = /^[A-Za-z0-9]{22}$/;
  *   | {kind:'attachment', url:string}
  *   | {kind:'url', url:string}
  *   | {kind:'local', q:string}
+ *   | {kind:'unsupported', q:string}
  *   | {kind:'search', source:'youtube'|'soundcloud', q:string}} Detected
  */
 
@@ -41,8 +42,10 @@ export function detect(input) {
     return { kind: 'search', source: 'soundcloud', q: rest };
   }
 
-  // Absolute local path (C:\..., \\server\share, /home/...) that the caller can stat.
-  if (/^[a-z]:[\\/]/i.test(q) || q.startsWith('\\\\') || (process.platform !== 'win32' && q.startsWith('/'))) {
+  // UNC paths (\\host\share, //host/share) are refused outright: even a stat() would leak NTLM credentials.
+  if (/^[\\/]{2}/.test(q)) return { kind: 'unsupported', q };
+  // Absolute local path (C:\..., /home/...): local.get() only accepts audio files inside MUSIC_DIR.
+  if (/^[a-z]:[\\/]/i.test(q) || (process.platform !== 'win32' && q.startsWith('/'))) {
     return { kind: 'local', q: path.normalize(q) };
   }
 

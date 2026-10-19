@@ -478,3 +478,81 @@ test('no leaked timers after stop and destroy (player + now-playing message)', a
   assert.equal(timers.live.size, 0, 'destroy clears every timer and interval');
   assert.equal(audio.state.status, 'idle');
 });
+
+// ---------------------------------------------------------------- review regressions
+
+test('each start gets an AbortSignal; skip/stop/seek abort the pending one', async () => {
+  const { p, sources } = make();
+  const release = sources.holdStreams();
+  p.enqueue([track(1), track(2), track(3)]);
+  await flush();
+  p.skip(); // while yt:1 is still opening
+  p.skip();
+  await flush();
+  assert.deepEqual(sources.calls.signals.map((s) => s.aborted), [true, true, false]);
+  release();
+  await flush();
+  assert.equal(p.current.id, 'yt:3');
+  assert.equal(p.resource.track.id, 'yt:3');
+  p.seek(10);
+  assert.equal(sources.calls.signals[2].aborted, true);
+  p.stop();
+  assert.equal(sources.calls.signals[3].aborted, true);
+});
+
+test('ogg/opus: a volume change while the stream opens is applied once it is open', async (t) => {
+  const { p, sources } = make({}, { type: 'ogg/opus' });
+  const release = sources.holdStreams();
+  p.enqueue([track(1)]);
+  await flush();
+  p.setVolume(30);
+  release();
+  await flush();
+  assert.equal(p.streamVolume, 60, 'stream was created with the old volume');
+  await new Promise((r) => setTimeout(r, 750));
+  await flush();
+  assert.deepEqual(sources.calls.createStream.map((c) => c.volume), [0.6, 0.3]);
+  assert.equal(p.streamVolume, 30);
+});
+
+test('pause (user or alone) while the stream opens is honoured; resume works', async () => {
+  const { p, audio, sources } = make();
+  const release = sources.holdStreams();
+  p.enqueue([track(1)]);
+  await flush();
+  assert.equal(p.pause(), true);
+  release();
+  await flush();
+  assert.equal(audio.state.status, 'paused');
+  assert.equal(p.resume(), true);
+  assert.equal(audio.state.status, 'playing');
+
+  const b = make();
+  b.p.humanCount = () => 0;
+  const rel2 = b.sources.holdStreams();
+  b.p.enqueue([track(1)]);
+  await flush();
+  b.p.checkAlone();
+  rel2();
+  await flush();
+  assert.equal(b.audio.state.status, 'paused');
+  assert.equal(b.p.pauseReason, 'alone');
+});
+
+test('attach() with nothing queued arms the idle timer (no slot held forever)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const { p } = make({ limits: { idleLeaveMin: 5 } });
+  p.attach({ subscribe() {}, destroy() {}, state: { status: 'ready' } }, 'vc1');
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(p.destroyed, true);
+});
+
+test('fallback flag from the stream handle: track gets fallback + fallbackFrom', async () => {
+  const { p, sources } = make();
+  const orig = sources.createStream;
+  sources.createStream = async (tr, o) => ({ ...(await orig(tr, o)), fallback: 'soundcloud', fallbackFrom: 'youtube' });
+  p.enqueue([track(1)]);
+  await flush();
+  assert.equal(p.current.source, 'youtube');
+  assert.equal(p.current.fallback, 'soundcloud');
+});

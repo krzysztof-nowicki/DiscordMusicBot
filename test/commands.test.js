@@ -343,14 +343,17 @@ test('heartbeat file + `node src/healthcheck.js` exit codes', async () => {
   const { spawnSync } = await import('node:child_process');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dmb-hb-'));
   const file = path.join(dir, 'heartbeat');
-  const check = () => spawnSync(process.execPath, ['src/healthcheck.js'], { env: { ...process.env, DATA_DIR: dir }, encoding: 'utf8' });
+  // Private temp dir for the child too, so a real bot's fallback heartbeat can't make this pass.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dmb-hbtmp-'));
+  const check = () =>
+    spawnSync(process.execPath, ['src/healthcheck.js'], { env: { ...process.env, DATA_DIR: dir, TMP: tmp, TEMP: tmp, TMPDIR: tmp }, encoding: 'utf8' });
   assert.equal(check().status, 1, 'missing heartbeat = unhealthy');
   let ready = false;
-  const stopNotReady = startHeartbeat(file, () => ready);
+  const stopNotReady = startHeartbeat([file], () => ready);
   assert.equal(heartbeatAgeSec(file), Infinity, 'no beat while Discord is not ready');
   stopNotReady();
   ready = true;
-  const stop = startHeartbeat(file, () => ready);
+  const stop = startHeartbeat([file], () => ready);
   assert.ok(heartbeatAgeSec(file) < 5);
   assert.equal(check().status, 0);
   stop();
@@ -359,4 +362,120 @@ test('heartbeat file + `node src/healthcheck.js` exit codes', async () => {
   const r = check();
   assert.equal(r.status, 1);
   assert.match(r.stderr, /300 s old/);
+});
+
+// ---------------------------------------------------------------- review regressions
+
+test('/play that finds nothing does not join voice (no MAX_ACTIVE_PLAYERS slot taken)', async () => {
+  const env = setup({ limits: { maxActivePlayers: 1 } });
+  const r = await run(env, { command: 'play', options: { query: 'nothing' } });
+  assert.match(text(last(r)), /Nothing found/);
+  assert.equal(env.manager.get('g1'), null);
+  assert.equal(env.manager.players.size, 0);
+});
+
+test('fallback note shows "(from SoundCloud)" for a YouTube track played via SoundCloud', async () => {
+  const { fallbackNote, trackLabel } = await import('../src/commands/util.js');
+  const tr = track(1, { source: 'youtube', fallback: 'soundcloud', fallbackFrom: 'youtube' });
+  assert.equal(fallbackNote(tr), '(from SoundCloud)');
+  assert.equal(trackLabel(tr), 'Artist 1 - Song 1 (from SoundCloud)');
+  assert.equal(fallbackNote(track(2)), '');
+});
+
+test('autocomplete does not cache empty (timed-out) search results', async () => {
+  const env = setup();
+  let calls = 0;
+  env.sources.search = async () => (++calls === 1 ? [] : [track(70, { title: 'Found Later' })]);
+  env.sources.localLibrary = () => ({ search: async () => [] });
+  const a = await run(env, { command: 'play', focused: 'rare query' });
+  assert.deepEqual(a.calls[0][1], []);
+  const b = await run(env, { command: 'play', focused: 'rare query' });
+  assert.equal(calls, 2, 'searched again');
+  assert.match(b.calls[0][1][0].name, /Found Later/);
+});
+
+test('unwritable DATA_DIR: heartbeat falls back to a second location, store keeps working in memory', async () => {
+  const { startHeartbeat, heartbeatAgeSec } = await import('../src/heartbeat.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dmb-ro-'));
+  const blocker = path.join(dir, 'not-a-dir');
+  fs.writeFileSync(blocker, 'x'); // a file where a directory should be: mkdir/write fail like EACCES would
+  const files = [path.join(blocker, 'data', 'heartbeat'), path.join(dir, 'fallback-heartbeat')];
+  const logs = [];
+  const stop = startHeartbeat(files, () => true, { log: (m) => logs.push(m) });
+  stop();
+  assert.equal(fs.existsSync(files[1]), true);
+  assert.ok(heartbeatAgeSec(files) < 5);
+  assert.match(logs[0], /cannot write/);
+
+  const errors = [];
+  const origErr = console.error;
+  console.error = (m) => errors.push(m);
+  try {
+    setDataDir(path.join(blocker, 'data'));
+    settings.set('gx', { volume: 33 });
+    settings.set('gx', { volume: 34 });
+    assert.equal(settings.get('gx').volume, 34, 'kept in memory');
+    assert.equal(errors.length, 1, 'warned once');
+  } finally {
+    console.error = origErr;
+    setDataDir(fs.mkdtempSync(path.join(os.tmpdir(), 'dmb-cmd-')));
+  }
+});
+
+test('DAVE failures recreate the connection without losing the player; a failed join posts one notice', async () => {
+  const env = setup();
+  const joins = [];
+  const conns = [];
+  env.manager.join = async (channel, opts) => {
+    joins.push(opts);
+    const c = { subscribe() {}, rejoin() {}, state: { status: 'ready' }, destroy() { this.state = { status: 'destroyed' }; opts.onGone(this); } };
+    conns.push(c);
+    return c;
+  };
+  env.guild.channels.cache.set('vc1', { id: 'vc1', guild: env.guild, members: { filter: () => ({ size: 1 }) } });
+  await run(env, { command: 'play', options: { query: 'a' } });
+  await run(env, { command: 'play', options: { query: 'b' } });
+  const p = env.manager.get('g1');
+  await joins[0].onDaveBroken(conns[0]);
+  assert.equal(joins.length, 2);
+  assert.equal(conns[0].state.status, 'destroyed');
+  assert.equal(p.destroyed, false, 'player survives');
+  assert.equal(p.connection, conns[1]);
+  assert.equal(p.queue.length, 1, 'queue kept');
+  conns[1].destroy(); // a real disconnect of the current connection still tears down
+  assert.equal(p.destroyed, true);
+  await flush();
+  assert.equal(env.sent.filter((m) => /Disconnected/.test(m.content ?? '')).length, 1);
+
+  const env2 = setup();
+  env2.manager.join = async (channel, opts) => {
+    opts.onGone({ state: { status: 'destroyed' } }); // voice.js destroys the half-open connection on failure
+    throw new Error('timeout');
+  };
+  const r = await run(env2, { command: 'play', options: { query: 'x' } });
+  assert.match(text(last(r)), /Couldn't connect/);
+  await flush();
+  assert.equal(env2.sent.length, 0, 'no extra "disconnected" notice');
+});
+
+test('now-playing: two quick trackStarts post one card', async () => {
+  const { NowPlayingMessage } = await import('../src/ui/nowPlaying.js');
+  const { EventEmitter } = await import('node:events');
+  const p = Object.assign(new EventEmitter(), { current: track(1), queue: [], history: [], loop: 'off', volume: 60, autoplay: false, paused: false, position: () => 0 });
+  let sends = 0;
+  let edits = 0;
+  p.textChannel = { send: async () => (sends++, await flush(), { edit: async () => edits++ }) };
+  new NowPlayingMessage(p, { minGapMs: 0 });
+  p.emit('trackStart', p.current);
+  p.current = track(2);
+  p.emit('trackStart', p.current);
+  await flush(20);
+  assert.equal(sends, 1);
+  assert.ok(edits >= 1, 'the posted card is updated to the newer track');
+  p.emit('destroyed');
+});
+
+test('resource summary line format', async () => {
+  const { resourceLine } = await import('../src/health.js');
+  assert.equal(resourceLine(1, 3, { rss: 150 * 1048576, heapUsed: 40 * 1048576 }, 7500), '[res] rss=150MB heap=40MB players=1/3 uptime=2h05m');
 });

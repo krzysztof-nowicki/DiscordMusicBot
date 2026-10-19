@@ -93,7 +93,7 @@ If the queue is empty the song plays right away. Otherwise it's **added to the e
 | `/leave` | – | leave the voice channel |
 | `/nowplaying` | – | show the *Now playing* card |
 | `/seek` | `time` (required), e.g. `1:30`, `90`, `0:45` | jump to that point of the song |
-| `/replay` | – | play the previous song again |
+| `/replay` | – | play the current song again from the start |
 | `/volume` | `value` (optional, 0–200) | set the volume in %. With no value it shows the current one. It's saved per server; the default is 60. |
 | `/loop` | `mode` (required): **off** · **track** · **queue** | *track* repeats the current song; *queue* repeats the whole queue |
 | `/autoplay` | `state` (required): **on** · **off** | when the queue ends, keep playing related songs (default off) |
@@ -146,9 +146,9 @@ DEPLOY_NORTHFLANK.md.
   - `/stop`, `/leave`, `/volume` and `/clear`.
 - Everyone can always add songs, skip or remove their **own** songs, pause/resume, seek, and use `/move`, `/shuffle`, `/loop`
   and `/autoplay`.
-- Saved playlists can be deleted only by whoever saved them, or by a DJ.
+- Saved playlists can be overwritten or deleted by whoever saved them, or by a DJ. With no `DJ_ROLE`, everyone counts as a DJ.
 - You must be in the **same voice channel** as the bot to control it. Admins and DJs are exempt.
-- To prevent spam, each person can use `/play` at most **5 times per 10 seconds**.
+- To prevent spam, each person gets at most **5 requests per 10 seconds**, counted across `/play`, `/playnext`, `/search`, `/local` and `/playlist load` together.
 
 ## 8. Automatic behaviour (saves CPU)
 - **Alone in the channel:** the bot pauses at once. It resumes if someone comes back within 3 minutes; otherwise it leaves.

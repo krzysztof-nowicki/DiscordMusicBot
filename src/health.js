@@ -1,6 +1,14 @@
 // Optional HTTP health endpoint (PORT > 0) for container platforms: GET /health -> 200 JSON status.
 import http from 'node:http';
 
+/** `[res] rss=123MB heap=45MB players=1/3 uptime=2h05m` (logged every 10 min). */
+export function resourceLine(players, maxPlayers, mem = process.memoryUsage(), uptimeSec = process.uptime()) {
+  const mb = (n) => Math.round(n / 1048576);
+  const h = Math.floor(uptimeSec / 3600);
+  const m = String(Math.floor((uptimeSec % 3600) / 60)).padStart(2, '0');
+  return `[res] rss=${mb(mem.rss)}MB heap=${mb(mem.heapUsed)}MB players=${players}/${maxPlayers || '∞'} uptime=${h}h${m}m`;
+}
+
 /**
  * @param {number} port
  * @param {() => object} status  extra fields merged into the JSON

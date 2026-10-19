@@ -25,13 +25,23 @@ function read(name) {
   return data;
 }
 
-/** Atomic write: temp file + rename, so a crash never leaves half a JSON file. */
+let warnedWrite = false;
+
+/**
+ * Atomic write: temp file + rename, so a crash never leaves half a JSON file. A read-only/root-owned DATA_DIR
+ * (e.g. a volume mounted without permissions) must not crash the bot: keep the data in memory, warn once.
+ */
 function write(name) {
-  fs.mkdirSync(dataDir, { recursive: true });
   const file = path.join(dataDir, name);
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(cache.get(name), null, 2));
-  fs.renameSync(tmp, file);
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(cache.get(name), null, 2));
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    if (!warnedWrite) console.error(`[store] cannot write ${file} (${e.code || e.message}); settings stay in memory only`);
+    warnedWrite = true;
+  }
 }
 
 export const settings = {

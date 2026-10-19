@@ -67,12 +67,13 @@ export async function playAutocomplete(interaction, ctx, budgetMs = AUTOCOMPLETE
   const build = () => [...(got.yt ?? []), ...(got.local ?? [])].map(choiceFor);
   const all = Promise.all([yt, local]).then(() => {
     const choices = build();
-    lruSet(acCache, key, choices, AC_CACHE_MAX);
+    // search() returns [] on its own timeout/error: cache only real YouTube answers, never empty/partial ones.
+    if (got.yt?.length) lruSet(acCache, key, choices, AC_CACHE_MAX);
     return choices;
   });
 
   const done = await Promise.race([all.then(() => true), sleep(budgetMs).then(() => false)]);
-  if (done) return respond(acCache.get(key));
+  if (done) return respond(build());
   // Too slow: partial results, or the longest cached prefix of this query.
   let choices = build();
   if (!choices.length) {
@@ -106,7 +107,7 @@ async function playCommand(interaction, ctx, next) {
   requireVoice(interaction);
   checkRate(interaction.user.id, ctx.config);
   await interaction.deferReply();
-  const player = await ctx.manager.connect(interaction);
+  // Resolve first: a query that finds nothing must not occupy a voice connection (MAX_ACTIVE_PLAYERS slot).
   const resolved = att
     ? await ctx.sources.resolve(att.url, {
         limit: 1,
@@ -115,6 +116,7 @@ async function playCommand(interaction, ctx, next) {
     : await resolveQuery(query, ctx);
   const { tracks = [], playlist } = resolved ?? {};
   if (!tracks.length) throw new UserError(t('notFound'));
+  const player = await ctx.manager.connect(interaction);
   const res = enqueueTracks(player, tracks, { requestedBy: interaction.user.id, next, config: ctx.config });
   const text =
     next && res.added === 1 && !res.startedNow && !res.dropped ? t('addedNext', { title: md(trackLabel(tracks[0])) }) : addedText(res, tracks, playlist);

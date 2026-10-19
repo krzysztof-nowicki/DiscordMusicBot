@@ -32,3 +32,16 @@
 - Autocomplete answers within 2.5 s; late results still fill the cache. Values > 100 chars / local tracks → `ac:<n>` tokens.
 - Python edits on Windows: open(..., newline='') or the file turns CRLF; the Bash tool halves backslashes in heredocs.
 - npm test glob is test/*.test.js, so test/helpers/ is not run as tests.
+
+## Review fixes (session 2, round 2)
+- Per-start AbortController → createStream({signal}); aborted in _halt (skip/stop/seek/leave).
+- streamVolume = volume actually passed; mismatch after open → debounced re-create. Pause during opening → paused after play().
+- /play resolves before connecting; attach() arms the idle timer when nothing is queued.
+- fallbackNote reads track.fallback ('soundcloud'); handle.fallback copied to the track.
+- Autocomplete caches only non-empty YouTube answers.
+- Dockerfile: tini as ENTRYPOINT (verified PID 1 + healthcheck in a real build).
+- Heartbeat: DATA_DIR/heartbeat, fallback os.tmpdir()/discord-music-bot-heartbeat; healthcheck takes the freshest.
+  Store writes never throw (one warning). Verified with a root-owned tmpfs /app/data in the container.
+- DAVE: voice.js calls onDaveBroken → manager._recreate destroys + rejoins; onGone only acts for p.connection
+  (so a failed first join posts just joinFailed). NowPlayingMessage serializes the first send.
+- `[res] rss=…MB heap=…MB players=N/M uptime=…` every 10 min, always.

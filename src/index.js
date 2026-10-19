@@ -6,9 +6,8 @@ import * as sources from './sources/index.js';
 import { settings, playlists } from './store.js';
 import { PlayerManager } from './player/manager.js';
 import { commandJson, handleInteraction } from './commands/index.js';
-import { startHealthServer } from './health.js';
-import { startHeartbeat } from './heartbeat.js';
-import path from 'node:path';
+import { resourceLine, startHealthServer } from './health.js';
+import { heartbeatFiles, startHeartbeat } from './heartbeat.js';
 
 const log = (m) => console.log(`${new Date().toISOString().slice(11, 19)} ${m}`);
 
@@ -47,23 +46,15 @@ if (config.port > 0) {
     .catch((e) => log(`health server failed on port ${config.port}: ${e.message}`));
 }
 
-// Small cloud instances: a one-line resource summary every 10 min (only when PORT/health is enabled).
-const resourceTimer =
-  config.port > 0
-    ? setInterval(() => {
-        const mb = (n) => Math.round(n / 1048576);
-        const m = process.memoryUsage();
-        const playing = [...manager.players.values()].filter((p) => p.current && !p.paused).length;
-        log(`resources: rss ${mb(m.rss)} MB, heap ${mb(m.heapUsed)} MB, players ${manager.players.size}, playing ${playing}`);
-      }, 10 * 60_000).unref()
-    : null;
+// One-line resource summary every 10 min (always on: small cloud instances need it most).
+const resourceTimer = setInterval(() => log(resourceLine(manager.players.size, config.limits.maxActivePlayers)), 10 * 60_000).unref();
 
 let stopHeartbeat = null;
 
 client.once(Events.ClientReady, async (c) => {
   log(`logged in as ${c.user.tag} (${c.guilds.cache.size} servers)`);
   // Liveness for `node src/healthcheck.js`: fresh only while the gateway is connected.
-  stopHeartbeat ??= startHeartbeat(path.join(config.dataDir, 'heartbeat'), () => client.isReady(), { log });
+  stopHeartbeat ??= startHeartbeat(heartbeatFiles(config.dataDir), () => client.isReady(), { log });
   try {
     if (config.guildId) {
       await c.application.commands.set(commandJson(), config.guildId);
@@ -106,7 +97,7 @@ async function shutdown() {
   manager.destroyAll(); // kills every yt-dlp/ffmpeg stream and leaves voice
   health?.close();
   stopHeartbeat?.();
-  if (resourceTimer) clearInterval(resourceTimer);
+  clearInterval(resourceTimer);
   await client.destroy().catch(() => {});
   setTimeout(() => process.exit(0), 500);
 }

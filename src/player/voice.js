@@ -17,11 +17,13 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 /**
  * Join a voice channel and resolve once the connection is Ready.
  * Network blips and DAVE glitches are handled here; when the connection is gone for good it is destroyed
- * and `onGone()` is called (the GuildPlayer then cleans up).
+ * and `onGone(connection)` is called (the GuildPlayer then cleans up).
+ * Persistent DAVE failures call `onDaveBroken(connection)`: a rejoin() in the Ready state only resends the join
+ * payload and does not renegotiate DAVE, so the caller destroys and recreates the connection instead.
  * @param {import('discord.js').VoiceBasedChannel} channel
- * @param {{log?: (m: string) => void, onGone?: () => void}} [opts]
+ * @param {{log?: (m: string) => void, onGone?: (c: any) => void, onDaveBroken?: (c: any) => void}} [opts]
  */
-export async function joinChannel(channel, { log = console.log, onGone = () => {} } = {}) {
+export async function joinChannel(channel, { log = console.log, onGone = () => {}, onDaveBroken = null } = {}) {
   const connection = joinVoiceChannel({
     channelId: channel.id,
     guildId: channel.guild.id,
@@ -46,11 +48,12 @@ export async function joinChannel(channel, { log = console.log, onGone = () => {
     if (daveFails.length >= DAVE_FAIL_REJOIN && now - lastRejoin > REJOIN_COOLDOWN_MS) {
       lastRejoin = now;
       daveFails = [];
-      log('[voice] persistent DAVE failures, rejoining');
+      log('[voice] persistent DAVE failures, recreating the connection');
       try {
-        connection.rejoin();
+        if (onDaveBroken) onDaveBroken(connection);
+        else connection.rejoin();
       } catch (e) {
-        log(`[voice] rejoin failed: ${e.message}`);
+        log(`[voice] DAVE recovery failed: ${e.message}`);
       }
     }
   });
@@ -76,7 +79,7 @@ export async function joinChannel(channel, { log = console.log, onGone = () => {
         safeDestroy(connection);
       }
     } else if (newS.status === VoiceConnectionStatus.Destroyed) {
-      onGone();
+      onGone(connection);
     } else if (
       !readyWatch &&
       (newS.status === VoiceConnectionStatus.Connecting || newS.status === VoiceConnectionStatus.Signalling)

@@ -99,6 +99,7 @@ export const SOURCE_NAMES = {
 
 /** "(z SoundCloud)" when the source fell back (e.g. YouTube blocked a datacenter IP → SoundCloud match). */
 export function fallbackNote(tr) {
+  if (tr?.fallback) return t('fromSource', { source: SOURCE_NAMES[tr.fallback] ?? tr.fallback });
   if (!tr?.fallbackFrom || tr.fallbackFrom === tr.source) return '';
   return t('fromSource', { source: SOURCE_NAMES[tr.source] ?? tr.source });
 }

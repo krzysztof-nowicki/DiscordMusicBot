@@ -54,8 +54,14 @@ const MESSAGES = {
   NETWORK: { pl: 'Problem z połączeniem ze źródłem. Spróbuj ponownie za chwilę.', en: 'Network problem reaching the source. Try again shortly.' },
   TOOL_MISSING: { pl: 'Brakuje narzędzia (yt-dlp lub ffmpeg). Uruchom setup.ps1.', en: 'A tool is missing (yt-dlp or ffmpeg). Run setup.ps1.' },
   LOCAL_MISSING: { pl: 'Nie znaleziono pliku w lokalnej bibliotece.', en: 'File not found in the local library.' },
+  ABORTED: { pl: 'Przerwano.', en: 'Cancelled.' },
   STREAM_FAILED: { pl: 'Nie udało się odtworzyć tego utworu.', en: "Couldn't play this track." },
 };
+
+/** Throw SourceError('ABORTED') if the signal is already aborted. */
+export function throwIfAborted(signal) {
+  if (signal?.aborted) throw new SourceError('ABORTED', 'aborted');
+}
 
 /** Error with a short user-facing message (in config.lang) and the technical cause in `.detail`. */
 export class SourceError extends Error {

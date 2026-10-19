@@ -61,11 +61,14 @@ export function track(n, extra = {}) {
 }
 
 export function fakeSources({ failIds = [], searchResults = [], mix = null, type = 'raw', fallbackIds = [] } = {}) {
-  const calls = { createStream: [], kill: [], prefetch: [], search: [], resolve: [] };
+  const calls = { createStream: [], kill: [], prefetch: [], search: [], resolve: [], signals: [] };
+  let gate = null; // set by holdStreams(): createStream waits until released
   return {
     calls,
     async createStream(tr, opts = {}) {
       calls.createStream.push({ id: tr.id, seekSec: opts.seekSec ?? 0, volume: opts.volume });
+      calls.signals.push(opts.signal);
+      if (gate) await gate.promise;
       if (failIds.includes(tr.id)) {
         const e = new Error('Ten utwór jest niedostępny.');
         e.name = 'SourceError';
@@ -76,6 +79,15 @@ export function fakeSources({ failIds = [], searchResults = [], mix = null, type
       const handle = { stream, type, kill: () => calls.kill.push(tr.id) };
       if (fallbackIds.includes(tr.id)) handle.fallbackFrom = 'youtube';
       return handle;
+    },
+    /** Make the next createStream calls hang until the returned release() is called. */
+    holdStreams() {
+      let release;
+      gate = { promise: new Promise((r) => (release = r)) };
+      return () => {
+        gate = null;
+        release();
+      };
     },
     async prefetch(tr) {
       calls.prefetch.push(tr.id);

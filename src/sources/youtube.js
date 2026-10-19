@@ -53,7 +53,7 @@ async function innertube(q, { signal, timeoutMs = 2000 } = {}) {
 }
 
 async function ytdlpSearch(q, limit, { signal, lowPriority = false } = {}) {
-  const info = await ytdlpJson(['--flat-playlist', '-J', `ytsearch${limit}:${q}`], { timeoutMs: 20_000, signal, errCode: 'NOT_FOUND', lowPriority });
+  const info = await ytdlpJson(['--flat-playlist', '-J', '--', `ytsearch${limit}:${q}`], { timeoutMs: 20_000, signal, errCode: 'NOT_FOUND', lowPriority });
   return (info.entries || []).filter((e) => e?.id).map((e) => {
     const isLive = e.live_status === 'is_live';
     return { id: e.id, title: e.title || e.id, channel: e.channel || e.uploader || '', durationSec: isLive ? null : e.duration ?? null, isLive };

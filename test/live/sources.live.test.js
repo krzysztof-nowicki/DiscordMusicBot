@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createStream, ensureTools, resolve, search, makeTrack } from '../../src/sources/index.js';
-import { createLibrary } from '../../src/sources/local.js';
+import { allowLocalRoot, createLibrary } from '../../src/sources/local.js';
 import { tools } from '../../src/tools.js';
 
 const BPS = 48000 * 2 * 2; // s16le stereo 48 kHz
@@ -50,9 +50,20 @@ async function playCase(name, query, { seconds = 3, opts = {}, pick = 0 } = {}) 
 
 /** Whole process table: [{pid, ppid, name}]. */
 function procTable() {
-  const out = WIN
-    ? execFileSync('powershell', ['-NoProfile', '-Command', 'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId),$($_.ParentProcessId),$($_.Name)" }'], { encoding: 'utf8' })
-    : execFileSync('ps', ['-eo', 'pid=,ppid=,comm='], { encoding: 'utf8' }).replace(/^\s*(\d+)\s+(\d+)\s+/gm, '$1,$2,');
+  if (!WIN) {
+    // /proc/<pid>/stat = "pid (comm) state ppid ..." (works in slim images without procps)
+    const rows = [];
+    for (const d of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(d)) continue;
+      try {
+        const st = fs.readFileSync(`/proc/${d}/stat`, 'utf8');
+        const close = st.lastIndexOf(')');
+        rows.push({ pid: +d, ppid: +st.slice(close + 2).split(' ')[1], name: st.slice(st.indexOf('(') + 1, close) });
+      } catch {}
+    }
+    return rows;
+  }
+  const out = execFileSync('powershell', ['-NoProfile', '-Command', 'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId),$($_.ParentProcessId),$($_.Name)" }'], { encoding: 'utf8' });
   return out.split(/\r?\n/).filter(Boolean).map((l) => { const [pid, ppid, ...n] = l.trim().split(','); return { pid: +pid, ppid: +ppid, name: n.join(',') }; });
 }
 /** yt-dlp/ffmpeg processes descended from this test process (other agents' ffmpeg on the box don't count). */
@@ -72,6 +83,8 @@ const mp3 = path.join(tmp, 'Zażółć Gęślą.mp3');
 execFileSync(tools.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=8', '-ac', '2', '-ar', '44100',
   '-metadata', 'title=Zażółć Gęślą', '-metadata', 'artist=Testowy Artysta', '-b:a', '128k', mp3]);
 const tmpLong = fs.mkdtempSync(path.join(os.tmpdir(), 'dmb-live-long-'));
+allowLocalRoot(tmp); // local tracks outside MUSIC_DIR are refused unless their folder is allowed
+allowLocalRoot(tmpLong);
 const longMp3 = path.join(tmpLong, 'long.mp3'); // 120 s: its paused stream can't finish during the orphan test
 execFileSync(tools.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=120', '-ac', '2', '-b:a', '64k', longMp3]);
 after(() => {
@@ -198,6 +211,25 @@ test('Local file: byte rate, seek, library search', async () => {
   assert.ok(Math.abs(res.bytes / BPS - 8) < 0.1, `8 s file decoded to ${(res.bytes / BPS).toFixed(3)} s`);
   const seek = await take(await createStream(track, { mode: 'pcm', seekSec: 5 }), Infinity, Date.now());
   assert.ok(Math.abs(seek.bytes / BPS - 3) < 0.1, `seek 5 s of 8 s gave ${(seek.bytes / BPS).toFixed(3)} s`);
+});
+
+test('every consumer style gets data: on(data), pipe, for-await (pcm + opus)', async () => {
+  // Regression: the stream used to be left explicitly paused (pause + unshift), so a plain on('data') got 0 bytes.
+  const { Writable } = await import('node:stream');
+  const local = makeTrack({ id: `local:${mp3}`, title: 'x', source: 'local', streamUrl: mp3 });
+  for (const mode of ['pcm', 'opus']) {
+    let h = await createStream(local, { mode });
+    const onData = await new Promise((r) => { let n = 0; h.stream.on('data', (c) => { n += c.length; }); h.stream.on('end', () => r(n)); });
+    h = await createStream(local, { mode });
+    const piped = await new Promise((r) => { let n = 0; h.stream.pipe(new Writable({ write(c, e, cb) { n += c.length; cb(); } })).on('finish', () => r(n)); });
+    h = await createStream(local, { mode });
+    let iterated = 0;
+    for await (const c of h.stream) iterated += c.length;
+    if (mode === 'pcm') assert.ok(Math.abs(onData / BPS - 8) < 0.1, `on(data) got ${onData} bytes`);
+    else assert.ok(onData > 50_000, `opus on(data) got ${onData} bytes`);
+    assert.equal(piped, onData, `${mode} pipe`);
+    assert.equal(iterated, onData, `${mode} for-await`);
+  }
 });
 
 test('Opus mode produces Ogg/Opus (local + YouTube), volume filter accepted', async () => {

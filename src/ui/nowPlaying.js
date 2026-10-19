@@ -130,6 +130,7 @@ export class NowPlayingMessage {
     this.lastEdit = 0;
     this.gapTimer = null;
     this.interval = null;
+    this.sending = null; // promise of the card being posted
     player.on('trackStart', () => this.show());
     player.on('update', () => this.refresh());
     player.on('queueEnd', () => this.finish());
@@ -143,10 +144,22 @@ export class NowPlayingMessage {
       if (this.player.current && !this.player.paused) this.refresh();
     }, this.progressMs);
     this.interval.unref?.();
+    if (this.sending) {
+      // A card is being posted right now (two trackStarts in a row): edit that one instead of posting another.
+      this.dirty = true;
+      return this.sending;
+    }
     if (this.message && this.live) return this.refresh(true);
     const ch = this.player.textChannel;
     if (!ch?.send) return;
     this.live = true;
+    this.sending = this._send(ch);
+    await this.sending;
+    this.sending = null;
+    if (this.dirty && this.live && this.message) this.refresh(true);
+  }
+
+  async _send(ch) {
     try {
       this.busy = true;
       this.message = await ch.send(nowPlayingPayload(this.player));

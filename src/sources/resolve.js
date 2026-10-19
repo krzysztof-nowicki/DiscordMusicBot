@@ -6,7 +6,7 @@ import { getLibrary } from './local.js';
 import { rankCandidates } from './match.js';
 import { expandShortLink, resolveSpotify } from './spotify.js';
 import { primeStreamInfo } from './stream.js';
-import { makeTrack, SourceError } from './track.js';
+import { makeTrack, SourceError, throwIfAborted } from './track.js';
 import { BROWSER_UA, fetchT, Lru } from './util.js';
 import { candToTrack, ytSearchCandidates } from './youtube.js';
 import { entryToTrack, soundcloudSearch, ytdlpJson, ytdlpResolve } from './ytdlp.js';
@@ -20,8 +20,9 @@ function rankTextResults(cands, q) {
 
 /** Duration of a media URL/file via ffprobe (null if unknown/live). */
 async function probeDuration(input, signal) {
-  if (!tools.ffprobe) return null;
   try {
+    await ensureTools();
+    if (!tools.ffprobe) return null;
     const r = await run(tools.ffprobe, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', input], { timeoutMs: 8000, signal });
     const d = Number(r.stdout.trim());
     return Number.isFinite(d) && d > 0 ? d : null;
@@ -46,7 +47,7 @@ const extOf = (url) => {
 export function parseRadioPlaylist(text) {
   for (const line of String(text).split(/\r?\n/)) {
     const l = line.trim();
-    const m = /^File\d+=(.+)$/i.exec(l);
+    const m = /^File\d+=(https?:\/\/.+)$/i.exec(l);
     if (m) return m[1].trim();
     if (/^https?:\/\//i.test(l)) return l;
   }
@@ -66,8 +67,34 @@ async function attachmentTrack({ url, name }, signal) {
   return makeTrack({ id: `attachment:${stable}`, title, durationSec: await probeDuration(url, signal), url, streamUrl: url, source: 'attachment' });
 }
 
-/** Any other http(s) URL: audio file, radio stream, radio playlist, or a page for yt-dlp. */
-async function resolveUrl(url, { playlistLimit, signal }) {
+export const RADIO_PLAYLIST_MAX_DEPTH = 2;
+export const RADIO_PLAYLIST_MAX_BYTES = 256 * 1024;
+
+/** Read at most `max` bytes of a response body (radio playlists are tiny; a hostile one may not be). */
+async function readCapped(res, max = RADIO_PLAYLIST_MAX_BYTES) {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const parts = [];
+  let total = 0;
+  try {
+    while (total < max) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      total += value.length;
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(parts).subarray(0, max).toString('utf8');
+}
+
+/**
+ * Any other http(s) URL: audio file, radio stream, radio playlist (.m3u/.pls, followed at most
+ * RADIO_PLAYLIST_MAX_DEPTH levels, body capped), or a page for yt-dlp.
+ */
+async function resolveUrl(url, { playlistLimit, signal, depth = 0 }) {
+  throwIfAborted(signal);
   const ext = extOf(url);
   if (AUDIO_EXT.includes(ext) && ext !== 'webm') {
     const t = await fileUrlTrack(url, 'http', signal);
@@ -76,14 +103,20 @@ async function resolveUrl(url, { playlistLimit, signal }) {
   let res = null;
   try {
     res = await fetchT(url, { timeoutMs: 8000, signal, headers: { 'user-agent': BROWSER_UA, 'icy-metadata': '0' } });
-  } catch {}
+  } catch {
+    throwIfAborted(signal);
+  }
   const ct = (res?.headers.get('content-type') || '').toLowerCase();
   const icyName = res?.headers.get('icy-name');
   const isPlaylist = PLAYLIST_EXT.includes(ext) || /mpegurl|scpls|x-pls/.test(ct);
   if (res?.ok && isPlaylist && !/application\/vnd\.apple\.mpegurl/.test(ct) && ext !== 'm3u8') {
-    const inner = parseRadioPlaylist(await res.text());
+    if (depth >= RADIO_PLAYLIST_MAX_DEPTH) {
+      res.body?.cancel().catch(() => {});
+      throw new SourceError('UNSUPPORTED', `radio playlist nested too deep (or self-referencing): ${url}`);
+    }
+    const inner = parseRadioPlaylist(await readCapped(res));
     if (!inner) throw new SourceError('UNSUPPORTED', `empty radio playlist ${url}`);
-    return resolveUrl(inner, { playlistLimit, signal }).then((r) => {
+    return resolveUrl(inner, { playlistLimit, signal, depth: depth + 1 }).then((r) => {
       for (const t of r.tracks) if (t.source === 'radio') t.url = url; // keep the station's playlist URL as the link
       return r;
     });
@@ -118,10 +151,8 @@ async function resolveSingle(url, signal) {
  */
 export async function resolve(query, { limit = 1, playlistLimit = 500, signal, attachment } = {}) {
   if (attachment?.url) return { tracks: [await attachmentTrack(attachment, signal)] };
-  const d = detect(query);
-  if (d.kind !== 'local' && d.kind !== 'spotify') {
-    try { await ensureTools(); } catch (e) { throw new SourceError('TOOL_MISSING', e.message); }
-  }
+  throwIfAborted(signal);
+  const d = detect(query); // tools are ensured lazily by whatever needs them (yt-dlp calls, ffprobe)
   switch (d.kind) {
     case 'search': {
       if (!d.q) throw new SourceError('NOT_FOUND', 'empty query');
@@ -152,7 +183,7 @@ export async function resolve(query, { limit = 1, playlistLimit = 500, signal, a
       if (d.type === 'track') return resolveSingle(d.url, signal);
       if (d.kind === 'soundcloud') {
         // Flat SoundCloud set entries carry no titles, so do a full extraction.
-        const info = await ytdlpJson(['-J', '--playlist-end', String(playlistLimit), d.url], { timeoutMs: 180_000, signal, errCode: 'UNAVAILABLE' });
+        const info = await ytdlpJson(['-J', '--playlist-end', String(playlistLimit), '--', d.url], { timeoutMs: 180_000, signal, errCode: 'UNAVAILABLE' });
         const tracks = (info.entries || [info]).filter(Boolean).map((e) => entryToTrack(e, 'soundcloud'));
         if (!tracks.length) throw new SourceError('NOT_FOUND', d.url);
         return info.entries ? { tracks, playlist: { title: info.title, url: info.webpage_url || d.url, count: tracks.length } } : { tracks };
