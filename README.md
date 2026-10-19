@@ -1,5 +1,6 @@
+Created mostly using Claude Code </br>
 # DiscordMusicBot
-Created mostly using Claude Code
+
 A self-hosted Discord music bot. It plays **YouTube, Spotify** (matched to YouTube/SoundCloud), **SoundCloud, Bandcamp,
 internet radio, Twitch, ~1000 other sites** (via yt-dlp), **direct audio links, uploaded files and your local music
 folder**. It has slash commands with autocomplete, a *Now playing* card with buttons, loop/shuffle/seek/volume, saved
