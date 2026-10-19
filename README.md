@@ -97,4 +97,4 @@ docker build -t discord-music-bot .   # the same image Northflank builds
 
 ## Legal
 For personal use on your own servers. Downloading or streaming content may conflict with the terms of service of
-YouTube, Spotify and other sites. You're responsible for how you use it. Tell people in the voice channel what the bot does.
+YouTube, Spotify and other sites. You're responsible for how you use it.
