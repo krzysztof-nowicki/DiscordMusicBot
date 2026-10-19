@@ -10,7 +10,7 @@ import { setDataDir, settings, playlists } from '../src/store.js';
 import { GuildPlayer } from '../src/player/GuildPlayer.js';
 import { PlayerManager } from '../src/player/manager.js';
 import { commandJson, handleInteraction } from '../src/commands/index.js';
-import { parseTime } from '../src/commands/util.js';
+import { parseTime, resetRateLimits } from '../src/commands/util.js';
 import { startHealthServer } from '../src/health.js';
 import { FakeAudioPlayer, fakeResource, fakeSources, track, flush } from './helpers/fakes.js';
 
@@ -19,15 +19,21 @@ before(() => setDataDir(fs.mkdtempSync(path.join(os.tmpdir(), 'dmb-cmd-'))));
 
 const DJ = { id: 'r-dj', name: 'DJ' };
 
-function setup({ djRole = '', sourcesOpts = {} } = {}) {
+function setup({ djRole = '', sourcesOpts = {}, limits = {} } = {}) {
+  resetRateLimits();
   const sources = fakeSources(sourcesOpts);
   sources.resolve = async (q, opts) => {
     sources.calls.resolve.push({ q, opts });
     if (q === 'nothing') return { tracks: [] };
     return { tracks: [track(sources.calls.resolve.length, { title: `Res ${q.slice(0, 20)}` })] };
   };
+  settings.set('g1', { volume: 60, autoplay: false }); // tests share the temp settings.json
   const guild = { id: 'g1', name: 'G', channels: { cache: new Map() } };
-  const config = { djRole, defaultVolume: 60, idleLeaveMin: 0, aloneLeaveMin: 0 };
+  const config = {
+    djRole,
+    defaultVolume: 60,
+    limits: { idleLeaveMin: 0, aloneLeaveMin: 0, pauseLeaveMin: 0, pauseKillSec: 0, maxActivePlayers: 0, playRateCount: 0, maxPlaylist: 200, ...limits },
+  };
   const manager = new PlayerManager({
     sources,
     config,
@@ -43,7 +49,7 @@ function setup({ djRole = '', sourcesOpts = {} } = {}) {
 }
 
 /** Minimal discord.js-like interaction. Records every reply-ish call as [method, payload, msSinceCreated]. */
-function mock(env, { command, sub, options = {}, focused, user = 'u1', voice = 'vc1', roles = [], admin = false, customId, values, kind } = {}) {
+function mock(env, { command, sub, options = {}, focused, user = 'u1', voice = 'vc1', roles = [], admin = false, customId, values, kind, guildId = 'g1' } = {}) {
   const t0 = Date.now();
   const calls = [];
   const rec = (name) => async (payload) => {
@@ -57,7 +63,7 @@ function mock(env, { command, sub, options = {}, focused, user = 'u1', voice = '
     commandName: command,
     customId,
     values,
-    guildId: 'g1',
+    guildId,
     guild: env.guild,
     channel: env.textChannel,
     user: { id: user },
@@ -127,7 +133,7 @@ test('/play: needs voice, defers, resolves, plays; second /play queues', async (
   const a = await run(env, { command: 'play', options: { query: 'first song' } });
   assert.equal(a.calls[0][0], 'deferReply');
   assert.equal(last(a)[0], 'editReply');
-  assert.match(text(last(a)), /Playing: \*\*Res first song/);
+  assert.match(text(last(a)), /Playing: \*\*Artist 1 - Res first song/);
   const p = env.manager.get('g1');
   assert.equal(p.current.requestedBy, 'u1');
   assert.equal(p.textChannel, env.textChannel);
@@ -241,7 +247,7 @@ test('/queue paginates with buttons; now-playing buttons update the message', as
 
   const toggle = await run(env, { customId: 'np:toggle' });
   assert.equal(last(toggle)[0], 'update');
-  assert.equal(env.manager.get('g1').manuallyPaused, true);
+  assert.equal(env.manager.get('g1').pauseReason, 'user');
   assert.match(last(toggle)[1].embeds[0].data.author.name, /Paused/);
   const loop = await run(env, { customId: 'np:loop' });
   assert.equal(env.manager.get('g1').loop, 'track');
@@ -255,7 +261,7 @@ test('/search shows a select menu; picking enqueues the track', async () => {
   const s = await run(env, { command: 'search', options: { query: 'beat' } });
   assert.equal(s.calls[0][0], 'deferReply');
   assert.ok(s.calls[0][1].flags, 'ephemeral');
-  const menu = last(s)[1].components[0].components[0].data;
+  const menu = last(s)[1].components[0].toJSON().components[0];
   assert.equal(menu.options.length, 2);
   const pick = await run(env, { customId: menu.custom_id, values: ['t:1'] });
   assert.equal(pick.calls[0][0], 'deferUpdate');
@@ -311,4 +317,46 @@ test('health endpoint returns JSON status', async () => {
   assert.equal(typeof body.uptimeSec, 'number');
   assert.equal((await fetch(`http://127.0.0.1:${port}/nope`)).status, 404);
   server.close();
+});
+
+test('limits: per-user /play rate limit, MAX_ACTIVE_PLAYERS, MAX_PLAYLIST trimming', async () => {
+  const env = setup({ limits: { playRateCount: 2, playRateWindowSec: 10, maxActivePlayers: 1, maxPlaylist: 3 } });
+  await run(env, { command: 'play', options: { query: 'one' } });
+  await run(env, { command: 'play', options: { query: 'two' } });
+  const third = await run(env, { command: 'play', options: { query: 'three' } });
+  assert.match(text(last(third)), /at most 2 requests per 10 s/);
+  assert.ok(isEphemeral(last(third)));
+  const otherUser = await run(env, { command: 'play', options: { query: 'x' }, user: 'u2' });
+  assert.match(text(last(otherUser)), /Added/);
+
+  const busy = await run(env, { command: 'play', options: { query: 'elsewhere' }, user: 'u3', guildId: 'g2' });
+  assert.match(text(last(busy)), /already playing in 1 places/);
+
+  env.sources.resolve = async () => ({ tracks: [1, 2, 3, 4, 5].map((n) => track(100 + n)), playlist: { title: 'Big', count: 5 } });
+  const pl = await run(env, { command: 'play', options: { query: 'big playlist' }, user: 'u4' });
+  assert.match(text(last(pl)), /Added \*\*3\*\* tracks from \*\*Big\*\* \(2 skipped/);
+  env.manager.destroyAll();
+});
+
+test('heartbeat file + `node src/healthcheck.js` exit codes', async () => {
+  const { startHeartbeat, heartbeatAgeSec } = await import('../src/heartbeat.js');
+  const { spawnSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dmb-hb-'));
+  const file = path.join(dir, 'heartbeat');
+  const check = () => spawnSync(process.execPath, ['src/healthcheck.js'], { env: { ...process.env, DATA_DIR: dir }, encoding: 'utf8' });
+  assert.equal(check().status, 1, 'missing heartbeat = unhealthy');
+  let ready = false;
+  const stopNotReady = startHeartbeat(file, () => ready);
+  assert.equal(heartbeatAgeSec(file), Infinity, 'no beat while Discord is not ready');
+  stopNotReady();
+  ready = true;
+  const stop = startHeartbeat(file, () => ready);
+  assert.ok(heartbeatAgeSec(file) < 5);
+  assert.equal(check().status, 0);
+  stop();
+  const old = new Date(Date.now() - 300_000);
+  fs.utimesSync(file, old, old);
+  const r = check();
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /300 s old/);
 });

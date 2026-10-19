@@ -1,9 +1,19 @@
 // /local search [query] (search or browse MUSIC_DIR with a select menu) and /local all [folder] (queue a folder).
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, SlashCommandBuilder, StringSelectMenuBuilder } from 'discord.js';
 import { describe, t } from '../ui/i18n.js';
-import { UserError, addedText, clip, fmtTime, md, requireVoice, storePick, trackLabel, updatePick } from './util.js';
-
-const FOLDER_MAX_TRACKS = 500;
+import {
+  UserError,
+  addedText,
+  checkRate,
+  clip,
+  enqueueTracks,
+  fmtTime,
+  md,
+  requireVoice,
+  storePick,
+  trackLabel,
+  updatePick,
+} from './util.js';
 
 const baseName = (dir) => dir.split(/[\\/]/).filter(Boolean).pop() ?? dir;
 const parentOf = (dir) => {
@@ -52,10 +62,10 @@ async function listing(ctx, dir) {
 
 async function queueFolder(interaction, ctx, dir) {
   const r = (await ctx.sources.localLibrary().list(dir, { recursive: true })) ?? {};
-  const tracks = (r.tracks ?? []).slice(0, FOLDER_MAX_TRACKS);
+  const tracks = r.tracks ?? [];
   if (!tracks.length) throw new UserError(t('localFolderEmpty'));
   const player = await ctx.manager.connect(interaction);
-  const res = player.enqueue(tracks, { requestedBy: interaction.user.id });
+  const res = enqueueTracks(player, tracks, { requestedBy: interaction.user.id, config: ctx.config });
   return addedText(res, tracks, { title: dir ? baseName(dir) : t('localRoot') });
 }
 
@@ -70,6 +80,7 @@ export const local = {
 
   async execute(interaction, ctx) {
     const sub = interaction.options.getSubcommand();
+    checkRate(interaction.user.id, ctx.config);
     if (sub === 'all') {
       requireVoice(interaction);
       await interaction.deferReply();
@@ -124,7 +135,7 @@ export async function handleLocalPick(interaction, ctx, pick, id) {
   requireVoice(interaction);
   await interaction.deferUpdate();
   const player = await ctx.manager.connect(interaction);
-  const res = player.enqueue([tr], { requestedBy: interaction.user.id });
+  const res = enqueueTracks(player, [tr], { requestedBy: interaction.user.id, config: ctx.config });
   await interaction.editReply({ ...menuPayload(id, pick), content: addedText(res, [tr]) });
 }
 

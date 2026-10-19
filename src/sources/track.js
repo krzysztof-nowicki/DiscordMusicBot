@@ -17,6 +17,7 @@ import { config } from '../config.js';
  *                                   (local absolute path, radio/http URL, generic page URL). Player: pass through untouched.
  * @property {'soundcloud'} [fallback] set by createStream() when YouTube refused (bot check) and a SoundCloud match
  *                                   is playing instead; the UI shows "(z SoundCloud)". `fallbackTrack` is that match.
+ * @property {'youtube'} [fallbackFrom] set together with `fallback`.
  * @property {Track} [fallbackTrack]
  */
 

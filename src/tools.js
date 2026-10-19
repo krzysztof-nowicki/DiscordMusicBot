@@ -1,8 +1,9 @@
 // External tools (Windows and Linux):
 //  - yt-dlp: YTDLP_PATH, else BIN_DIR/yt-dlp[.exe] (downloaded from GitHub if missing), else PATH. Self-updated with
 //    `-U` at most once a day when the binary is writable (YouTube breaks old versions quickly).
-//  - deno: yt-dlp's JS runtime for YouTube's signature/n challenges (needed since yt-dlp 2025.11; EJS scripts are
-//    bundled in the yt-dlp binaries). DENO_PATH, BIN_DIR/deno, PATH, else downloaded; node is the fallback runtime.
+//  - JS runtime for YouTube's signature/n challenges (needed since yt-dlp 2025.11; the EJS solver scripts are bundled
+//    in the yt-dlp binaries): node (this process's own binary, the default) or deno (YTDLP_JS_RUNTIME=deno: DENO_PATH,
+//    BIN_DIR/deno, PATH, else downloaded).
 //  - ffmpeg/ffprobe: FFMPEG_PATH, PATH, common Windows dirs.
 //  - cookies: YTDLP_COOKIES_B64 or YTDLP_COOKIES -> private 0600 temp copy (yt-dlp rewrites its cookie file).
 // All yt-dlp flags live in ytdlpProfile / ytdlpBaseArgs() below.
@@ -32,22 +33,54 @@ const envList = (k) => {
   return v.split(/\s+/);
 };
 
+const envArgList = (k) => {
+  const v = (process.env[k] ?? '').trim();
+  if (!v) return null;
+  if (v.startsWith('[')) { try { return JSON.parse(v).map(String); } catch {} }
+  return [v];
+};
+
 /**
  * The one place for yt-dlp tuning (env-overridable, so cloud deploys can change flags without a rebuild):
- *  YTDLP_JS_RUNTIME     auto (deno if found, else node) | deno | node
- *  YTDLP_EXTRACTOR_ARGS e.g. "youtube:player_client=default,mweb"  (JSON array for several)
- *  YTDLP_EXTRA_ARGS     extra raw args, whitespace-separated or a JSON array
+ *  YTDLP_JS_RUNTIME            node (default; Node >= 22 runs the EJS solver) | deno
+ *  YTDLP_FORMAT                default "bestaudio[acodec=opus]/bestaudio/best"
+ *  YTDLP_EXTRACTOR_ARGS        always passed, e.g. "youtube:player_client=default,mweb" (JSON array for several)
+ *  YTDLP_RETRY_EXTRACTOR_ARGS  used for one retry after a failed YouTube extraction; default
+ *                              "youtube:player_client=tv" with cookies, else "youtube:player_client=default,android_vr"
+ *  YTDLP_EXTRA_ARGS            appended raw args, whitespace-separated or a JSON array
+ *  YTDLP_CONCURRENCY           parallel yt-dlp extractions (default 1 on Linux, 2 on Windows); the rest queue
+ *  YTDLP_FORCE_IPV4            1 (default) | 0
  */
 export const ytdlpProfile = {
-  jsRuntime: (process.env.YTDLP_JS_RUNTIME || 'auto').trim().toLowerCase(),
-  extractorArgs: (() => {
-    const v = (process.env.YTDLP_EXTRACTOR_ARGS ?? '').trim();
-    if (!v) return [];
-    if (v.startsWith('[')) { try { return JSON.parse(v).map(String); } catch {} }
-    return [v];
-  })(),
+  jsRuntime: (process.env.YTDLP_JS_RUNTIME || 'node').trim().toLowerCase() === 'deno' ? 'deno' : 'node',
+  format: (process.env.YTDLP_FORMAT || '').trim() || 'bestaudio[acodec=opus]/bestaudio/best',
+  extractorArgs: envArgList('YTDLP_EXTRACTOR_ARGS') || [],
+  retryExtractorArgs: envArgList('YTDLP_RETRY_EXTRACTOR_ARGS'), // null = default chosen by cookies
   extraArgs: envList('YTDLP_EXTRA_ARGS'),
+  concurrency: Math.max(1, Number(process.env.YTDLP_CONCURRENCY) || (WIN ? 2 : 1)),
+  forceIpv4: (process.env.YTDLP_FORCE_IPV4 ?? '1').trim() !== '0',
+  cacheDir: path.join(config.dataDir, 'yt-dlp-cache'),
 };
+
+/** Counting semaphore for yt-dlp extraction processes (tiny cloud CPUs: keep them sequential). */
+class Slots {
+  constructor(n) { this.n = n; this.busy = 0; this.q = []; }
+  async acquire() {
+    if (this.busy < this.n) { this.busy++; return; }
+    await new Promise((r) => this.q.push(r));
+  }
+  /** Low-priority work (autocomplete): only if a slot is free right now. */
+  tryAcquire() {
+    if (this.busy >= this.n) return false;
+    this.busy++;
+    return true;
+  }
+  release() {
+    const next = this.q.shift();
+    if (next) next(); else this.busy--;
+  }
+}
+export const ytdlpSlots = new Slots(ytdlpProfile.concurrency);
 
 /** Resolved tools. `deno` may be null (node is then yt-dlp's JS runtime); `ffprobe` and `cookies` are optional. */
 export const tools = { ytdlp: null, ytdlpVersion: null, deno: null, ffmpeg: null, ffprobe: null, cookies: null };
@@ -183,7 +216,6 @@ async function unzip(zip, dir) {
 async function ensureDeno() {
   const local = path.join(config.binDir, `deno${EXE}`);
   for (const c of [(process.env.DENO_PATH ?? '').trim(), local, 'deno'].filter(Boolean)) if (denoOk(await version(c))) return c;
-  if (ytdlpProfile.jsRuntime === 'node') return null; // not wanted: don't download 100 MB
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'deno-dl-'));
   try {
     const zip = path.join(tmpDir, 'deno.zip');
@@ -239,7 +271,7 @@ export function ensureTools(opts = {}) {
     const state = await readState();
     const [y, deno, ff, cookies] = await Promise.all([
       ensureYtdlp(state, { update: opts.update ?? true }),
-      ensureDeno().catch((e) => { log('deno unavailable, using node as JS runtime:', e.message); return null; }),
+      ytdlpProfile.jsRuntime === 'deno' ? ensureDeno().catch((e) => { log('deno unavailable, using node as JS runtime:', e.message); return null; }) : null,
       findFfmpeg(),
       prepareCookies().catch((e) => { log('cookies:', e.message); return null; }),
     ]);
@@ -254,15 +286,20 @@ export function ensureTools(opts = {}) {
 }
 
 function jsRuntimeArg() {
-  const want = ytdlpProfile.jsRuntime;
-  if (want !== 'node' && tools.deno) return `deno:${tools.deno}`;
-  return `node:${process.execPath}`;
+  return ytdlpProfile.jsRuntime === 'deno' && tools.deno ? `deno:${tools.deno}` : `node:${process.execPath}`;
 }
 
-/** Common yt-dlp arguments: JS runtime, extractor args, cookies and extra args from ytdlpProfile. */
-export function ytdlpBaseArgs() {
-  const a = ['--no-warnings', '--no-progress', '--ignore-config', '--js-runtimes', jsRuntimeArg()];
-  for (const x of ytdlpProfile.extractorArgs) a.push('--extractor-args', x);
+/**
+ * Common yt-dlp arguments from ytdlpProfile. `retry` swaps in the retry player clients.
+ * (--cache-dir keeps solved player-JS between runs, like XDG_CACHE_HOME would.)
+ */
+export function ytdlpBaseArgs({ retry = false } = {}) {
+  const a = ['--no-warnings', '--no-progress', '--ignore-config', '--no-js-runtimes', '--js-runtimes', jsRuntimeArg(), '--cache-dir', ytdlpProfile.cacheDir];
+  if (ytdlpProfile.forceIpv4) a.push('--force-ipv4');
+  const ex = retry
+    ? ytdlpProfile.retryExtractorArgs || [tools.cookies ? 'youtube:player_client=tv' : 'youtube:player_client=default,android_vr']
+    : ytdlpProfile.extractorArgs;
+  for (const x of ex) a.push('--extractor-args', x);
   if (tools.cookies) a.push('--cookies', tools.cookies);
   a.push(...ytdlpProfile.extraArgs);
   return a;

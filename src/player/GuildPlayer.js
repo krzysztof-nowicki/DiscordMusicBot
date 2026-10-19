@@ -1,4 +1,5 @@
-// One music player per guild: queue, history, loop modes, seek, volume, prefetch, autoplay and auto-leave.
+// One music player per guild: queue, history, loop modes, seek, volume, prefetch, autoplay, auto-leave and
+// resource limits (small cloud instances: pause when alone, kill streams during long pauses, queue caps).
 //
 // Transitions: every start/skip/stop/seek bumps `token` and clears `resource` BEFORE touching the AudioPlayer.
 // The AudioPlayer's Idle event only advances the queue when the resource that went idle is still `this.resource`,
@@ -15,11 +16,19 @@ import {
 import { t } from '../ui/i18n.js';
 
 const HISTORY_MAX = 50;
-const PREFETCH_LEAD_SEC = 20; // warm up the next track this long before the current one ends
 const MAX_FAILURES = 3;
-const MIN_PLAYED_MS = 1000; // a track that ends sooner than this (from 0, not live, not tiny) counted as failed
+const MIN_PLAYED_MS = 1000; // a track that ends sooner than this (from 0, not live, not tiny) counts as failed
 const AUTOPLAY_RECENT = 25;
 const VOLUME_RESTART_MS = 600; // ogg/opus streams bake the volume in: re-create after the slider settles
+
+export const DEFAULT_LIMITS = {
+  aloneLeaveMin: 3,
+  idleLeaveMin: 5,
+  pauseLeaveMin: 10,
+  pauseKillSec: 60,
+  prefetchLeadSec: 20,
+  maxQueue: 500,
+};
 
 export const LOOP_MODES = ['off', 'track', 'queue'];
 
@@ -52,7 +61,7 @@ export class GuildPlayer extends EventEmitter {
    * @param {object} o
    * @param {string} o.guildId
    * @param {{createStream: Function, prefetch?: Function, search?: Function, resolve?: Function}} o.sources
-   * @param {{defaultVolume: number, idleLeaveMin: number, aloneLeaveMin: number}} o.config
+   * @param {{defaultVolume: number, limits?: Partial<typeof DEFAULT_LIMITS>}} o.config
    * @param {{get: (g: string) => object, set: (g: string, patch: object) => void}} [o.settings]
    * @param {any} [o.audioPlayer]  @discordjs/voice AudioPlayer (or a fake in tests)
    * @param {(stream: any, track: any, type: 'raw'|'ogg/opus') => any} [o.createResource]
@@ -63,6 +72,7 @@ export class GuildPlayer extends EventEmitter {
     this.guildId = guildId;
     this.sources = sources;
     this.config = config;
+    this.limits = { ...DEFAULT_LIMITS, ...(config.limits ?? {}) };
     this.settings = settings;
     this.log = log;
     this.createResource = createResource;
@@ -71,7 +81,7 @@ export class GuildPlayer extends EventEmitter {
 
     const saved = settings?.get(guildId) ?? {};
     this.volume = Number.isFinite(saved.volume) ? saved.volume : config.defaultVolume;
-    this.autoplay = Boolean(saved.autoplay);
+    this.autoplay = Boolean(saved.autoplay); // default off
     this.loop = 'off';
 
     /** @type {any[]} */ this.queue = [];
@@ -81,6 +91,9 @@ export class GuildPlayer extends EventEmitter {
     this.handle = null; // { stream, type, kill } of the current track
     this.streamVolume = null; // volume baked into the current ogg/opus stream
     this.startOffset = 0; // seconds: where the current resource started (seek)
+    /** @type {null|'user'|'alone'} why playback is paused (alone = auto-resume when someone comes back) */
+    this.pauseReason = null;
+    this.suspendedAt = null; // seconds: position kept after the paused stream was killed
     this.token = 0;
     this.failures = 0;
     this.destroyed = false;
@@ -91,7 +104,7 @@ export class GuildPlayer extends EventEmitter {
     this.humanCount = null;
     this.lastError = null;
     this.prefetched = new WeakSet();
-    this.timers = { idle: null, alone: null, prefetch: null, volume: null };
+    this.timers = { idle: null, alone: null, prefetch: null, volume: null, pauseKill: null, pauseLeave: null };
 
     this.player.on('stateChange', (oldS, newS) => {
       if (newS.status === AudioPlayerStatus.Idle && oldS.status !== AudioPlayerStatus.Idle && oldS.resource) {
@@ -106,17 +119,18 @@ export class GuildPlayer extends EventEmitter {
 
   // ---------------------------------------------------------------- state
 
+  /** Paused by the user, by being alone, or auto-paused by @discordjs/voice (no subscriber during a reconnect). */
   get paused() {
-    const s = this.player.state.status;
-    return s === AudioPlayerStatus.Paused || s === AudioPlayerStatus.AutoPaused;
+    return this.pauseReason !== null || this.player.state.status === AudioPlayerStatus.AutoPaused;
   }
 
-  get manuallyPaused() {
-    return this.player.state.status === AudioPlayerStatus.Paused;
+  get suspended() {
+    return this.suspendedAt !== null;
   }
 
   /** Seconds into the current track. */
   position() {
+    if (this.suspended) return this.suspendedAt;
     return this.startOffset + (this.resource ? this.resource.playbackDuration / 1000 : 0);
   }
 
@@ -132,12 +146,17 @@ export class GuildPlayer extends EventEmitter {
   // ---------------------------------------------------------------- queue operations
 
   /**
+   * Adds at most `limits.maxQueue - queue.length` tracks.
    * @param {any[]} tracks
    * @param {{requestedBy?: string, next?: boolean}} [o]
-   * @returns {{position: number, startedNow: boolean}} position of the first added track (0 = playing now)
+   * @returns {{position: number, startedNow: boolean, added: number, dropped: number}}
+   *   position of the first added track (0 = playing now)
    */
   enqueue(tracks, { requestedBy, next = false } = {}) {
-    const items = tracks.map((tr) => ({ ...tr, requestedBy: requestedBy ?? tr.requestedBy }));
+    const room = Math.max(0, this.limits.maxQueue - this.queue.length + (this.current ? 0 : 1));
+    const items = tracks.slice(0, room).map((tr) => ({ ...tr, requestedBy: requestedBy ?? tr.requestedBy }));
+    const dropped = tracks.length - items.length;
+    if (!items.length) return { position: -1, startedNow: false, added: 0, dropped };
     let position;
     if (next) {
       this.queue.unshift(...items);
@@ -146,7 +165,7 @@ export class GuildPlayer extends EventEmitter {
       position = this.queue.length + 1;
       this.queue.push(...items);
     }
-    const startedNow = !this.current && items.length > 0;
+    const startedNow = !this.current;
     if (startedNow) {
       this.failures = 0;
       this._playNext();
@@ -155,7 +174,7 @@ export class GuildPlayer extends EventEmitter {
       this._schedulePrefetch();
       this.emit('update');
     }
-    return { position, startedNow };
+    return { position, startedNow, added: items.length, dropped };
   }
 
   /** Skip the current track and n-1 queued ones (loop "track" does not replay a skipped track). */
@@ -170,48 +189,61 @@ export class GuildPlayer extends EventEmitter {
     return skipped;
   }
 
-  /** Stop playback and clear the queue (stays in the channel). */
+  /** Stop playback and clear the queue (stays in the channel until the idle timer). */
   stop() {
     this.queue = [];
     const had = Boolean(this.current);
     if (this.current) this._pushHistory(this.current);
     this._halt();
+    this._clearPause();
     this.current = null;
     this._armIdle();
     this.emit('stopped');
     return had;
   }
 
-  pause() {
-    if (!this.current || this.manuallyPaused) return false;
-    const ok = this.player.pause(true);
-    if (ok) {
-      this._armIdle();
-      this.emit('update');
+  /**
+   * @param {'user'|'alone'} [reason]
+   * Pausing arms two timers: kill the stream after pauseKillSec (resume re-creates it with a seek) and leave
+   * after pauseLeaveMin.
+   */
+  pause(reason = 'user') {
+    if (!this.current) return false;
+    if (this.pauseReason) {
+      if (reason === 'user' && this.pauseReason === 'alone') this.pauseReason = 'user'; // no auto-resume then
+      return reason === 'user';
     }
-    return ok;
+    if (this.resource) this.player.pause(true);
+    this.pauseReason = reason;
+    const { pauseKillSec, pauseLeaveMin } = this.limits;
+    if (pauseKillSec > 0) this.timers.pauseKill = this._timer(pauseKillSec * 1000, () => this._suspend());
+    if (pauseLeaveMin > 0) {
+      this.timers.pauseLeave = this._timer(pauseLeaveMin * 60_000, () => this.destroy(t('leftPaused', { min: pauseLeaveMin })));
+    }
+    this.emit('update');
+    return true;
   }
 
   resume() {
-    if (!this.manuallyPaused) return false;
-    const ok = this.player.unpause();
-    if (ok) {
-      this._clearTimer('idle');
-      this.emit('update');
-    }
-    return ok;
+    if (!this.pauseReason) return false;
+    const at = this.suspendedAt;
+    this._clearPause();
+    if (at !== null) this._start(this.current, this.current.isLive ? 0 : at, { restart: true });
+    else this.player.unpause();
+    this.emit('update');
+    return true;
   }
 
   togglePause() {
-    return this.manuallyPaused ? this.resume() : this.pause();
+    return this.pauseReason ? this.resume() : this.pause('user');
   }
 
-  /** Recreate the current stream starting at `sec`. */
+  /** Recreate the current stream starting at `sec` (also un-pauses). */
   seek(sec) {
     const cur = this.current;
     if (!cur || cur.isLive || sec < 0) return false;
     if (cur.durationSec != null && sec >= cur.durationSec) return false;
-    this._start(cur, sec);
+    this._start(cur, sec, { restart: true });
     return true;
   }
 
@@ -258,6 +290,7 @@ export class GuildPlayer extends EventEmitter {
   clear() {
     const n = this.queue.length;
     this.queue = [];
+    this._clearTimer('prefetch');
     this.emit('update');
     return n;
   }
@@ -265,7 +298,6 @@ export class GuildPlayer extends EventEmitter {
   setLoop(mode) {
     if (!LOOP_MODES.includes(mode)) throw new Error(`bad loop mode ${mode}`);
     this.loop = mode;
-    this._schedulePrefetch();
     this.emit('update');
     return mode;
   }
@@ -277,7 +309,7 @@ export class GuildPlayer extends EventEmitter {
   setVolume(v) {
     this.volume = Math.max(0, Math.min(200, Math.round(v)));
     if (this.resource?.volume) this.resource.volume.setVolume(this.volume / 100);
-    else if (this.current) this._scheduleVolumeRestart();
+    else if (this.current && !this.suspended) this._scheduleVolumeRestart();
     this.settings?.set(this.guildId, { volume: this.volume });
     this.emit('update');
     return this.volume;
@@ -290,24 +322,43 @@ export class GuildPlayer extends EventEmitter {
     return this.autoplay;
   }
 
-  // ---------------------------------------------------------------- auto-leave
+  // ---------------------------------------------------------------- auto-leave / pause handling
 
-  /** Call when members of the bot's channel change. */
+  /** Call when members of the bot's channel change: alone → pause now, leave later; someone back → resume. */
   checkAlone() {
     if (this.destroyed || !this.humanCount) return;
     if (this.humanCount() === 0) {
-      if (!this.timers.alone && this.config.aloneLeaveMin > 0) {
-        this.timers.alone = this._timer(this.config.aloneLeaveMin * 60_000, () => this.destroy(t('leftAlone')));
+      if (this.current && !this.pauseReason) this.pause('alone');
+      if (!this.timers.alone && this.limits.aloneLeaveMin > 0) {
+        this.timers.alone = this._timer(this.limits.aloneLeaveMin * 60_000, () => this.destroy(t('leftAlone')));
       }
     } else {
       this._clearTimer('alone');
+      if (this.pauseReason === 'alone') this.resume();
     }
   }
 
+  /** Long pause: free CPU/RAM by killing ffmpeg/yt-dlp; the position is kept for resume(). */
+  _suspend() {
+    this.timers.pauseKill = null;
+    if (!this.current || !this.pauseReason || this.suspended) return;
+    const at = this.position();
+    this._halt();
+    this.suspendedAt = at;
+    this.log(`[player] paused for long: stream closed at ${Math.round(at)} s`);
+  }
+
+  _clearPause() {
+    this.pauseReason = null;
+    this.suspendedAt = null;
+    this._clearTimer('pauseKill');
+    this._clearTimer('pauseLeave');
+  }
+
   _armIdle() {
-    if (this.timers.idle || this.destroyed || !(this.config.idleLeaveMin > 0)) return;
-    this.timers.idle = this._timer(this.config.idleLeaveMin * 60_000, () =>
-      this.destroy(t('leftIdle', { min: this.config.idleLeaveMin })),
+    if (this.timers.idle || this.destroyed || !(this.limits.idleLeaveMin > 0)) return;
+    this.timers.idle = this._timer(this.limits.idleLeaveMin * 60_000, () =>
+      this.destroy(t('leftIdle', { min: this.limits.idleLeaveMin })),
     );
   }
 
@@ -316,21 +367,21 @@ export class GuildPlayer extends EventEmitter {
     this._clearTimer('volume');
     this.timers.volume = this._timer(VOLUME_RESTART_MS, () => {
       this.timers.volume = null;
-      if (!this.current || this.destroyed) return;
+      if (!this.current || this.destroyed || this.suspended) return;
       if (!this.resource) return this._scheduleVolumeRestart(); // still opening: try again shortly
       if (this.resource.volume || this.streamVolume === this.volume) return;
-      this._start(this.current, this.current.isLive ? 0 : this.position(), { restart: true });
+      this._start(this.current, this.current.isLive ? 0 : this.position(), { restart: true, keepPause: true });
     });
   }
 
   _timer(ms, fn) {
     const h = setTimeout(fn, ms);
-    h.unref?.();
+    h?.unref?.();
     return h;
   }
 
   _clearTimer(name) {
-    clearTimeout(this.timers[name]);
+    if (this.timers[name]) clearTimeout(this.timers[name]);
     this.timers[name] = null;
   }
 
@@ -363,10 +414,15 @@ export class GuildPlayer extends EventEmitter {
     if (this.history.length > HISTORY_MAX) this.history.length = HISTORY_MAX;
   }
 
-  /** @param {{restart?: boolean}} [o] restart = same track re-created (volume change): no trackStart, keep pause */
-  async _start(track, seekSec = 0, { restart = false } = {}) {
+  /**
+   * @param {{restart?: boolean, keepPause?: boolean}} [o]
+   *   restart: same track re-created (seek/volume/resume) → no trackStart event.
+   *   keepPause: stay paused afterwards (volume change while paused).
+   */
+  async _start(track, seekSec = 0, { restart = false, keepPause = false } = {}) {
     if (this.destroyed) return;
-    const wasPaused = restart && this.manuallyPaused;
+    const stayPaused = keepPause && this.pauseReason !== null;
+    if (!stayPaused) this._clearPause();
     this._halt();
     const token = this.token;
     this.current = track;
@@ -402,8 +458,8 @@ export class GuildPlayer extends EventEmitter {
     this.streamVolume = resource.volume ? null : this.volume;
     this.resource = resource;
     this.player.play(resource);
-    if (wasPaused) this.player.pause(true);
-    if (seekSec === 0 && !restart) this.emit('trackStart', track);
+    if (stayPaused && this.pauseReason) this.player.pause(true);
+    if (!restart) this.emit('trackStart', track);
     else this.emit('update');
     this._schedulePrefetch();
   }
@@ -458,6 +514,7 @@ export class GuildPlayer extends EventEmitter {
 
   async _onQueueEnd() {
     const token = ++this.token;
+    this._clearPause();
     if (this.autoplay && this.history[0]) {
       const pick = await this._related(this.history[0]).catch((e) => {
         this.log(`[player] autoplay failed: ${e.message}`);
@@ -495,17 +552,19 @@ export class GuildPlayer extends EventEmitter {
     return fresh(await this.sources.search(q, { limit: 8 })) ?? null;
   }
 
+  /** Prefetch only queue[0] (never more than one ahead), prefetchLeadSec before the current track ends. */
   _schedulePrefetch() {
     this._clearTimer('prefetch');
     if (!this.current || !this.sources.prefetch || this.destroyed) return;
     const next = this.queue[0];
     if (!next || this.prefetched.has(next)) return;
     const remain = this.current.durationSec != null ? this.current.durationSec - this.position() : null;
-    const delayMs = remain == null ? 5_000 : Math.max(0, (remain - PREFETCH_LEAD_SEC) * 1000);
+    if (remain == null) return; // live / unknown length: nothing to prepare for
+    const delayMs = Math.max(0, (remain - this.limits.prefetchLeadSec) * 1000);
     this.timers.prefetch = this._timer(delayMs, () => {
       this.timers.prefetch = null;
       const head = this.queue[0];
-      if (!head || this.prefetched.has(head)) return;
+      if (!head || this.prefetched.has(head) || this.paused) return;
       this.prefetched.add(head);
       Promise.resolve()
         .then(() => this.sources.prefetch(head))
@@ -515,11 +574,12 @@ export class GuildPlayer extends EventEmitter {
 
   // ---------------------------------------------------------------- teardown
 
-  /** Leave: kill streams, destroy the connection. `reason` (text) is posted by the manager. */
+  /** Leave: kill streams, clear every timer, destroy the connection. `reason` (text) is posted by the manager. */
   destroy(reason = null) {
     if (this.destroyed) return;
     this.queue = [];
     this._halt();
+    this._clearPause();
     this.current = null;
     this.destroyed = true;
     for (const k of Object.keys(this.timers)) this._clearTimer(k);

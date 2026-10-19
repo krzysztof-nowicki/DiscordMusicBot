@@ -52,8 +52,8 @@ async function innertube(q, { signal, timeoutMs = 2000 } = {}) {
   return parseInnertubeSearch(await res.json());
 }
 
-async function ytdlpSearch(q, limit, { signal } = {}) {
-  const info = await ytdlpJson(['--flat-playlist', '-J', `ytsearch${limit}:${q}`], { timeoutMs: 20_000, signal, errCode: 'NOT_FOUND' });
+async function ytdlpSearch(q, limit, { signal, lowPriority = false } = {}) {
+  const info = await ytdlpJson(['--flat-playlist', '-J', `ytsearch${limit}:${q}`], { timeoutMs: 20_000, signal, errCode: 'NOT_FOUND', lowPriority });
   return (info.entries || []).filter((e) => e?.id).map((e) => {
     const isLive = e.live_status === 'is_live';
     return { id: e.id, title: e.title || e.id, channel: e.channel || e.uploader || '', durationSec: isLive ? null : e.duration ?? null, isLive };
@@ -72,7 +72,7 @@ export async function ytSearchCandidates(q, limit = 10, { signal, fast = false }
     if (signal?.aborted) throw e;
     console.warn('[sources] innertube search failed, falling back to yt-dlp:', e.message);
   }
-  return (await ytdlpSearch(q, limit, { signal })).slice(0, limit);
+  return (await ytdlpSearch(q, limit, { signal, lowPriority: fast })).slice(0, limit);
 }
 
 /** @param {YtCandidate} c */

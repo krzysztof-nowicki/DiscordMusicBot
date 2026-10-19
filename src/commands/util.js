@@ -149,14 +149,47 @@ export function updatePick(id, patch) {
   if (p) Object.assign(p, patch, { expires: Date.now() + PICK_TTL_MS });
 }
 
-/** Reply text after enqueueing. */
+/** Reply text after enqueueing (result from enqueueTracks). */
 export function addedText(result, tracks, playlist) {
-  if (tracks.length > 1) {
-    return playlist?.title
-      ? t('addedPlaylist', { count: tracks.length, title: md(playlist.title) })
-      : t('addedMany', { count: tracks.length });
+  const n = result.added ?? tracks.length;
+  let s;
+  if (n > 1) {
+    s = playlist?.title ? t('addedPlaylist', { count: n, title: md(playlist.title) }) : t('addedMany', { count: n });
+  } else {
+    const title = md(trackLabel(tracks[0]));
+    s = result.startedNow ? t('playingNow', { title }) : t('added', { title, pos: result.position });
   }
-  const title = md(trackLabel(tracks[0]));
-  if (result.startedNow) return t('playingNow', { title });
-  return t('added', { title, pos: result.position });
+  return result.dropped ? `${s} ${t('queueTrimmed', { count: result.dropped })}` : s;
+}
+
+/** Enqueue with the MAX_PLAYLIST cap (per request) and MAX_QUEUE cap (player); throws when nothing fits. */
+export function enqueueTracks(player, tracks, { requestedBy, next = false, config }) {
+  const max = config.limits?.maxPlaylist > 0 ? config.limits.maxPlaylist : Infinity;
+  const capped = tracks.slice(0, max);
+  const res = player.enqueue(capped, { requestedBy, next });
+  if (!res.added) throw new UserError(t('queueFull', { max: player.limits.maxQueue }));
+  res.dropped += tracks.length - capped.length;
+  return res;
+}
+
+const rateLog = new Map();
+
+/** Per-user rate limit for commands that add music (PLAY_RATE_COUNT per PLAY_RATE_WINDOW_SEC). */
+export function checkRate(userId, config, now = Date.now()) {
+  const count = config.limits?.playRateCount ?? 0;
+  const sec = config.limits?.playRateWindowSec ?? 0;
+  if (!(count > 0 && sec > 0)) return;
+  const recent = (rateLog.get(userId) ?? []).filter((x) => now - x < sec * 1000);
+  if (recent.length >= count) {
+    rateLog.set(userId, recent);
+    throw new UserError(t('rateLimited', { count, sec }));
+  }
+  recent.push(now);
+  rateLog.set(userId, recent);
+  if (rateLog.size > 1000) for (const [k, v] of rateLog) if (!v.some((x) => now - x < sec * 1000)) rateLog.delete(k);
+}
+
+/** For tests. */
+export function resetRateLimits() {
+  rateLog.clear();
 }

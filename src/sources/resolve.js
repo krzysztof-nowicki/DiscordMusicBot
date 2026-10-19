@@ -58,6 +58,14 @@ async function fileUrlTrack(url, source, signal) {
   return makeTrack({ id: `${source}:${url.split('?')[0]}`, title: fileTitle(url), durationSec: await probeDuration(url, signal), url, source });
 }
 
+/** Discord attachment (CDN URL, signed and expiring) -> Track. Duration via ffprobe when available. */
+async function attachmentTrack({ url, name }, signal) {
+  try { await ensureTools(); } catch (e) { throw new SourceError('TOOL_MISSING', e.message); }
+  const title = name ? name.replace(/\.[a-z0-9]{2,5}$/i, '').replace(/_/g, ' ') : fileTitle(url);
+  const stable = url.split('?')[0];
+  return makeTrack({ id: `attachment:${stable}`, title, durationSec: await probeDuration(url, signal), url, streamUrl: url, source: 'attachment' });
+}
+
 /** Any other http(s) URL: audio file, radio stream, radio playlist, or a page for yt-dlp. */
 async function resolveUrl(url, { playlistLimit, signal }) {
   const ext = extOf(url);
@@ -104,9 +112,12 @@ async function resolveSingle(url, signal) {
 
 /**
  * @param {string} query
- * @param {{limit?: number, playlistLimit?: number, signal?: AbortSignal}} [opts]
+ * @param {{limit?: number, playlistLimit?: number, signal?: AbortSignal,
+ *          attachment?: {url: string, name?: string, size?: number, contentType?: string}}} [opts]
+ *   attachment: a Discord /play file option; streamed from its CDN URL (works without a local folder).
  */
-export async function resolve(query, { limit = 1, playlistLimit = 500, signal } = {}) {
+export async function resolve(query, { limit = 1, playlistLimit = 500, signal, attachment } = {}) {
+  if (attachment?.url) return { tracks: [await attachmentTrack(attachment, signal)] };
   const d = detect(query);
   if (d.kind !== 'local' && d.kind !== 'spotify') {
     try { await ensureTools(); } catch (e) { throw new SourceError('TOOL_MISSING', e.message); }
@@ -148,7 +159,7 @@ export async function resolve(query, { limit = 1, playlistLimit = 500, signal } 
       }
       return ytdlpResolve(d.url, { playlistLimit, signal });
     case 'attachment':
-      return { tracks: [await fileUrlTrack(d.url, 'attachment', signal)] };
+      return { tracks: [await attachmentTrack({ url: d.url }, signal)] };
     case 'local': {
       const lib = getLibrary();
       const exact = d.q && (await lib.get(d.q));
@@ -167,7 +178,7 @@ export async function resolve(query, { limit = 1, playlistLimit = 500, signal } 
 // ---------- search (autocomplete) ----------
 
 const SEARCH_DEADLINE_MS = 2400;
-const searchCache = new Lru(500, 15 * 60_000);
+const searchCache = new Lru(200, 10 * 60_000);
 
 /**
  * Fast search for autocomplete. Never throws; [] on error or when the deadline (2.4 s) passes
@@ -185,7 +196,7 @@ export async function search(query, { source = 'youtube', limit = 5 } = {}) {
     if (source === 'local') return getLibrary().search(q, limit);
     if (source === 'soundcloud') {
       await ensureTools();
-      return (await soundcloudSearch(q, limit)).slice(0, limit);
+      return (await soundcloudSearch(q, limit, undefined, { lowPriority: true })).slice(0, limit);
     }
     const cands = await ytSearchCandidates(q, Math.max(limit, 10), { fast: true });
     return rankTextResults(cands, q).slice(0, limit).map((r) => candToTrack(r.cand));

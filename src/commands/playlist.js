@@ -1,7 +1,7 @@
 // /playlist save|load|list|delete <name>: per-guild playlists in data/playlists.json.
 import { EmbedBuilder, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { describe, t } from '../ui/i18n.js';
-import { UserError, addedText, clip, isDj, md, requireVoice } from './util.js';
+import { UserError, addedText, checkRate, clip, enqueueTracks, isDj, md, requireVoice } from './util.js';
 
 const nameOpt = (auto) => (o) => describe(o.setName('name'), 'opt_name').setRequired(true).setMaxLength(50).setAutocomplete(auto);
 
@@ -44,10 +44,12 @@ export const playlist = {
     }
     // load
     requireVoice(interaction);
+    checkRate(interaction.user.id, ctx.config);
     await interaction.deferReply();
     const player = await ctx.manager.connect(interaction);
-    const res = player.enqueue(pl.tracks, { requestedBy: interaction.user.id });
-    const text = pl.tracks.length > 1 ? t('plLoaded', { name: md(pl.name), count: pl.tracks.length }) : addedText(res, pl.tracks);
+    const res = enqueueTracks(player, pl.tracks, { requestedBy: interaction.user.id, config: ctx.config });
+    let text = res.added > 1 ? t('plLoaded', { name: md(pl.name), count: res.added }) : addedText({ ...res, dropped: 0 }, pl.tracks);
+    if (res.dropped) text += ` ${t('queueTrimmed', { count: res.dropped })}`;
     await interaction.editReply({ content: text, allowedMentions: { parse: [] } });
   },
 

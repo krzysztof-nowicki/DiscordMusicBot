@@ -68,7 +68,7 @@ test('Playing -> Idle advances the queue once per track; loop track replays', { 
   const audio = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
   const transitions = [];
   audio.on('stateChange', (o, n) => transitions.push(`${o.status}->${n.status}`));
-  const p = new GuildPlayer({ guildId: 'e2e', sources, config: { defaultVolume: 50, idleLeaveMin: 0, aloneLeaveMin: 0 }, audioPlayer: audio });
+  const p = new GuildPlayer({ guildId: 'e2e', sources, config: { defaultVolume: 50, limits: { idleLeaveMin: 0, aloneLeaveMin: 0, pauseLeaveMin: 0, pauseKillSec: 0 } }, audioPlayer: audio });
   const started = [];
   let queueEnds = 0;
   const notices = [];
@@ -100,7 +100,7 @@ test('Playing -> Idle advances the queue once per track; loop track replays', { 
 test('skip and stop kill the running ffmpeg and do not double-advance', { skip: !haveFfmpeg && 'ffmpeg not found', timeout: 30_000 }, async () => {
   const sources = ffmpegSources();
   const audio = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
-  const p = new GuildPlayer({ guildId: 'e2e2', sources, config: { defaultVolume: 60, idleLeaveMin: 0, aloneLeaveMin: 0 }, audioPlayer: audio });
+  const p = new GuildPlayer({ guildId: 'e2e2', sources, config: { defaultVolume: 60, limits: { idleLeaveMin: 0, aloneLeaveMin: 0, pauseLeaveMin: 0, pauseKillSec: 0 } }, audioPlayer: audio });
   const started = [];
   p.on('trackStart', (tr) => started.push(tr.id));
   p.enqueue([tone(1), tone(2), tone(3)]);
@@ -123,7 +123,7 @@ test('skip and stop kill the running ffmpeg and do not double-advance', { skip: 
 test('ogg/opus streams play as OggOpus (no inline volume) and advance on Idle', { skip: !haveFfmpeg && 'ffmpeg not found', timeout: 30_000 }, async () => {
   const sources = ffmpegSources('ogg/opus');
   const audio = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
-  const p = new GuildPlayer({ guildId: 'e2e3', sources, config: { defaultVolume: 60, idleLeaveMin: 0, aloneLeaveMin: 0 }, audioPlayer: audio });
+  const p = new GuildPlayer({ guildId: 'e2e3', sources, config: { defaultVolume: 60, limits: { idleLeaveMin: 0, aloneLeaveMin: 0, pauseLeaveMin: 0, pauseKillSec: 0 } }, audioPlayer: audio });
   const started = [];
   let queueEnds = 0;
   const notices = [];

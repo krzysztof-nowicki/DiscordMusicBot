@@ -3,7 +3,7 @@ import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'disc
 import { t } from './i18n.js';
 import { SOURCE_EMOJI, UserError, clip, controlPlayer, fallbackNote, fmtTime, isDj, md, trackLabel } from '../commands/util.js';
 
-const PROGRESS_EDIT_MS = 15_000; // progress bar refresh (edits are rate-limited by Discord; keep it rare)
+const PROGRESS_EDIT_MS = 30_000; // progress bar refresh (NP_UPDATE_SEC); only while playing
 const MIN_EDIT_GAP_MS = 2_000; // coalesce bursts of state changes
 const QUEUE_PAGE = 10;
 const COLOR = 0x5865f2;

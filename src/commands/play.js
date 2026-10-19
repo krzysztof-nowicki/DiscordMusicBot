@@ -1,7 +1,19 @@
 // /play, /playnext (with autocomplete over search() + the local library) and /search (select menu of 5).
 import { ActionRowBuilder, MessageFlags, SlashCommandBuilder, StringSelectMenuBuilder } from 'discord.js';
 import { describe, t } from '../ui/i18n.js';
-import { SOURCE_EMOJI, UserError, addedText, clip, fmtTime, md, requireVoice, storePick, trackLabel } from './util.js';
+import {
+  SOURCE_EMOJI,
+  UserError,
+  addedText,
+  checkRate,
+  clip,
+  enqueueTracks,
+  fmtTime,
+  md,
+  requireVoice,
+  storePick,
+  trackLabel,
+} from './util.js';
 
 export const AUTOCOMPLETE_BUDGET_MS = 2_500; // Discord drops autocomplete answers after 3 s
 const AC_CACHE_MAX = 200;
@@ -72,7 +84,7 @@ export async function playAutocomplete(interaction, ctx, budgetMs = AUTOCOMPLETE
 async function resolveQuery(query, ctx) {
   if (tokens.has(query)) return { tracks: [tokens.get(query)] };
   if (/^ac:\d+$/.test(query)) throw new UserError(t('expired'));
-  return ctx.sources.resolve(query, { limit: 1 });
+  return ctx.sources.resolve(query, { limit: 1, playlistLimit: ctx.config.limits?.maxPlaylist ?? 200 });
 }
 
 /** Throws a UserError unless the Discord attachment looks like playable audio/video within the size limit. */
@@ -92,6 +104,7 @@ async function playCommand(interaction, ctx, next) {
   if (!query && !att) throw new UserError(t('needQuery'));
   if (att) checkAttachment(att);
   requireVoice(interaction);
+  checkRate(interaction.user.id, ctx.config);
   await interaction.deferReply();
   const player = await ctx.manager.connect(interaction);
   const resolved = att
@@ -102,9 +115,9 @@ async function playCommand(interaction, ctx, next) {
     : await resolveQuery(query, ctx);
   const { tracks = [], playlist } = resolved ?? {};
   if (!tracks.length) throw new UserError(t('notFound'));
-  const res = player.enqueue(tracks, { requestedBy: interaction.user.id, next });
+  const res = enqueueTracks(player, tracks, { requestedBy: interaction.user.id, next, config: ctx.config });
   const text =
-    next && tracks.length === 1 && !res.startedNow ? t('addedNext', { title: md(trackLabel(tracks[0])) }) : addedText(res, tracks, playlist);
+    next && res.added === 1 && !res.startedNow && !res.dropped ? t('addedNext', { title: md(trackLabel(tracks[0])) }) : addedText(res, tracks, playlist);
   await interaction.editReply({ content: text, allowedMentions: { parse: [] } });
 }
 
@@ -133,6 +146,7 @@ export const search = {
   async execute(interaction, ctx) {
     const query = interaction.options.getString('query', true).trim();
     const source = interaction.options.getString('source') ?? 'youtube';
+    checkRate(interaction.user.id, ctx.config);
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const tracks = ((await ctx.sources.search(query, { source, limit: 5 })) ?? []).slice(0, 5);
     if (!tracks.length) throw new UserError(t('notFound'));
@@ -159,7 +173,7 @@ export async function handleSearchPick(interaction, ctx, pick) {
   requireVoice(interaction);
   await interaction.deferUpdate();
   const player = await ctx.manager.connect(interaction);
-  const res = player.enqueue([tr], { requestedBy: interaction.user.id });
+  const res = enqueueTracks(player, [tr], { requestedBy: interaction.user.id, config: ctx.config });
   await interaction.editReply({ content: addedText(res, [tr]), components: [] });
 }
 

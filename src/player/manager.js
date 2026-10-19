@@ -52,6 +52,8 @@ export class PlayerManager {
       p.checkAlone();
       return p;
     }
+    const max = this.config.limits?.maxActivePlayers ?? 0;
+    if (max > 0 && this.players.size + this.pending.size >= max) throw new UserError(t('tooBusy', { max }));
     const job = this._create(channel, interaction.channel);
     this.pending.set(guildId, job);
     try {
@@ -70,7 +72,7 @@ export class PlayerManager {
       const ch = guild.channels?.cache?.get(p.channelId);
       return ch ? ch.members.filter((m) => !m.user.bot).size : 0;
     };
-    new NowPlayingMessage(p, { log });
+    new NowPlayingMessage(p, { log, progressMs: (this.config.limits?.npUpdateSec ?? 30) * 1000 });
     p.on('notice', (text) => this._post(p, text));
     p.on('destroyed', (reason) => {
       if (reason) this._post(p, reason);

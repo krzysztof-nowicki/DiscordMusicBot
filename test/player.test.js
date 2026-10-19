@@ -18,7 +18,8 @@ function make(opts = {}, srcOpts = {}) {
   const p = new GuildPlayer({
     guildId: opts.guildId ?? 'g1',
     sources,
-    config: { defaultVolume: 60, idleLeaveMin: 0, aloneLeaveMin: 0, ...opts.config },
+    // 0 = disabled; individual tests turn limits on
+    config: { defaultVolume: 60, limits: { idleLeaveMin: 0, aloneLeaveMin: 0, pauseLeaveMin: 0, pauseKillSec: 0, ...opts.limits } },
     settings: opts.settings ?? null,
     audioPlayer: audio,
     createResource: fakeResource,
@@ -33,7 +34,7 @@ const ids = (list) => list.map((x) => x.id);
 test('enqueue starts the first track, queues the rest, natural end advances once', async () => {
   const { p, audio, sources } = make();
   const r1 = p.enqueue([track(1)], { requestedBy: 'u1' });
-  assert.deepEqual(r1, { position: 0, startedNow: true });
+  assert.deepEqual(r1, { position: 0, startedNow: true, added: 1, dropped: 0 });
   const r2 = p.enqueue([track(2), track(3)], { requestedBy: 'u2' });
   assert.equal(r2.position, 1);
   await flush();
@@ -281,35 +282,6 @@ test('next track is prefetched shortly before the current one ends', async () =>
   assert.deepEqual(sources.calls.prefetch, ['yt:2'], 'not prefetched twice; only the head');
 });
 
-test('idle and alone timers make the player leave', async () => {
-  const idle = make({ config: { idleLeaveMin: 0.001 } }); // 60 ms
-  let reason = null;
-  idle.p.on('destroyed', (r) => (reason = r));
-  idle.p.enqueue([track(1)]);
-  await flush();
-  idle.audio.finish();
-  await new Promise((r) => setTimeout(r, 120));
-  assert.equal(idle.p.destroyed, true);
-  assert.match(reason, /Nothing played/);
-
-  const alone = make({ config: { aloneLeaveMin: 0.001 } });
-  let humans = 1;
-  alone.p.humanCount = () => humans;
-  alone.p.enqueue([track(1)]);
-  await flush();
-  humans = 0;
-  alone.p.checkAlone();
-  humans = 1;
-  alone.p.checkAlone(); // someone came back: timer cancelled
-  await new Promise((r) => setTimeout(r, 120));
-  assert.equal(alone.p.destroyed, false);
-  humans = 0;
-  alone.p.checkAlone();
-  await new Promise((r) => setTimeout(r, 120));
-  assert.equal(alone.p.destroyed, true);
-  assert.deepEqual(alone.sources.calls.kill, ['yt:1']);
-});
-
 test('ogg/opus: no inline volume; a volume change re-creates the stream at the position after a debounce', async () => {
   const { p, audio, sources } = make({}, { type: 'ogg/opus' });
   let starts = 0;
@@ -349,4 +321,160 @@ test('fallbackFrom from the stream handle is kept on the track', async () => {
   p.enqueue([track(1, { source: 'soundcloud' })]);
   await flush();
   assert.equal(p.current.fallbackFrom, 'youtube');
+});
+
+// ---------------------------------------------------------------- resource limits (fake timers)
+
+/** Records live timers created through the (mocked) globals so tests can assert nothing leaks. */
+function trackTimers() {
+  const live = new Set();
+  const orig = { st: globalThis.setTimeout, ct: globalThis.clearTimeout, si: globalThis.setInterval, ci: globalThis.clearInterval };
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    const h = orig.st(() => {
+      live.delete(h);
+      fn(...args);
+    }, ms);
+    live.add(h);
+    return h;
+  };
+  globalThis.clearTimeout = (h) => {
+    live.delete(h);
+    orig.ct(h);
+  };
+  globalThis.setInterval = (fn, ms, ...args) => {
+    const h = orig.si(fn, ms, ...args);
+    live.add(h);
+    return h;
+  };
+  globalThis.clearInterval = (h) => {
+    live.delete(h);
+    orig.ci(h);
+  };
+  return {
+    live,
+    restore() {
+      Object.assign(globalThis, { setTimeout: orig.st, clearTimeout: orig.ct, setInterval: orig.si, clearInterval: orig.ci });
+    },
+  };
+}
+
+test('idle: queue end leaves after IDLE_LEAVE_MIN', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const { p, audio } = make({ limits: { idleLeaveMin: 5 } });
+  let reason = null;
+  p.on('destroyed', (r) => (reason = r));
+  p.enqueue([track(1)]);
+  await flush();
+  audio.finish();
+  await flush();
+  t.mock.timers.tick(5 * 60_000 - 1);
+  assert.equal(p.destroyed, false);
+  t.mock.timers.tick(1);
+  assert.equal(p.destroyed, true);
+  assert.match(reason, /Nothing played for 5 min/);
+});
+
+test('alone: pauses at once, resumes when someone is back, leaves after ALONE_LEAVE_MIN', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const { p, audio, sources } = make({ limits: { aloneLeaveMin: 3 } });
+  let humans = 1;
+  p.humanCount = () => humans;
+  p.enqueue([track(1)]);
+  await flush();
+  humans = 0;
+  p.checkAlone();
+  assert.equal(audio.state.status, 'paused');
+  assert.equal(p.pauseReason, 'alone');
+  t.mock.timers.tick(2 * 60_000);
+  humans = 1;
+  p.checkAlone();
+  assert.equal(audio.state.status, 'playing', 'auto-resumed');
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal(p.destroyed, false, 'alone timer was cancelled');
+
+  // A user pause is not undone by someone joining.
+  p.pause();
+  humans = 0;
+  p.checkAlone();
+  humans = 1;
+  p.checkAlone();
+  assert.equal(p.pauseReason, 'user');
+  p.resume();
+
+  humans = 0;
+  p.checkAlone();
+  t.mock.timers.tick(3 * 60_000);
+  assert.equal(p.destroyed, true);
+  assert.deepEqual(sources.calls.kill, ['yt:1']);
+});
+
+test('long pause: streams killed after PAUSE_KILL_SEC, resume re-creates at the position, leave after PAUSE_LEAVE_MIN', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const { p, audio, sources } = make({ limits: { pauseKillSec: 60, pauseLeaveMin: 10 } });
+  let starts = 0;
+  p.on('trackStart', () => starts++);
+  p.enqueue([track(1), track(2)]);
+  await flush();
+  p.resource.playbackDuration = 42_000;
+  p.pause();
+  t.mock.timers.tick(59_999);
+  assert.deepEqual(sources.calls.kill, []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(sources.calls.kill, ['yt:1'], 'ffmpeg/yt-dlp killed while paused');
+  assert.equal(p.resource, null);
+  assert.equal(p.position(), 42);
+  assert.equal(p.paused, true);
+  assert.equal(p.current.id, 'yt:1');
+  audio.emit('stateChange', { status: 'idle' }, { status: 'idle' }); // stray events don't advance
+  assert.equal(p.current.id, 'yt:1');
+
+  assert.equal(p.resume(), true);
+  await flush();
+  assert.deepEqual(sources.calls.createStream.at(-1), { id: 'yt:1', seekSec: 42, volume: 0.6 });
+  assert.equal(audio.state.status, 'playing');
+  assert.equal(starts, 1, 'resume is not a new track');
+
+  p.pause();
+  t.mock.timers.tick(10 * 60_000);
+  assert.equal(p.destroyed, true);
+});
+
+test('MAX_QUEUE caps enqueue; prefetch stays one track ahead', async () => {
+  const { p } = make({ limits: { maxQueue: 3 } });
+  const r = p.enqueue([1, 2, 3, 4, 5, 6].map((n) => track(n)));
+  assert.deepEqual([r.added, r.dropped], [4, 2], 'one playing + 3 queued');
+  assert.equal(p.queue.length, 3);
+  assert.deepEqual(p.enqueue([track(9)]), { position: -1, startedNow: false, added: 0, dropped: 1 });
+});
+
+test('no leaked timers after stop and destroy (player + now-playing message)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const timers = trackTimers();
+  t.after(() => timers.restore());
+  const { NowPlayingMessage } = await import('../src/ui/nowPlaying.js');
+  const { p, audio } = make({ limits: { idleLeaveMin: 5, aloneLeaveMin: 3, pauseLeaveMin: 10, pauseKillSec: 60 } });
+  const edits = [];
+  p.textChannel = { send: async () => ({ edit: async (m) => edits.push(m) }) };
+  new NowPlayingMessage(p, { progressMs: 30_000, minGapMs: 0 });
+  p.humanCount = () => 0;
+  p.enqueue([track(1, { durationSec: 600 }), track(2)]);
+  await flush();
+  assert.ok(timers.live.size > 0, 'progress interval + prefetch timer running');
+  p.checkAlone(); // alone: pause + alone timer + pause timers
+  p.setVolume(10);
+  t.mock.timers.tick(30_000);
+  await flush();
+  const editsWhilePaused = edits.length;
+  t.mock.timers.tick(30_000);
+  await flush();
+  assert.equal(edits.length, editsWhilePaused, 'no progress edits while paused/alone');
+
+  p.stop();
+  await flush();
+  // Only the idle-leave timer (and the alone timer: still nobody there) may remain after stop.
+  assert.equal(timers.live.size, 2);
+  p.destroy();
+  await flush();
+  assert.equal(timers.live.size, 0, 'destroy clears every timer and interval');
+  assert.equal(audio.state.status, 'idle');
 });

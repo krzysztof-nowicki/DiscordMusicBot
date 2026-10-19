@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
-import { ensureTools, killTree, spawnTool, tools, ytdlpBaseArgs } from '../tools.js';
+import { ensureTools, killTree, spawnTool, tools, ytdlpBaseArgs, ytdlpProfile } from '../tools.js';
 import { MIN_SCORE, rankCandidates } from './match.js';
 import { matchSpotifyToYoutube } from './spotify.js';
 import { SourceError } from './track.js';
@@ -20,7 +20,7 @@ import { soundcloudSearch, ytdlpStreamInfo } from './ytdlp.js';
 
 const FIRST_DATA_TIMEOUT_MS = 30_000;
 const DIRECT_PROTOCOLS = new Set(['http', 'https', 'm3u8', 'm3u8_native']);
-const infoCache = new Lru(300);
+const infoCache = new Lru(200); // entries also carry expiresAt (signed URL expiry)
 const inflight = new Map();
 const fallbackCache = new Lru(500, 6 * 3600_000);
 
@@ -74,12 +74,14 @@ function localPath(track) {
 }
 
 /** ffmpeg arguments for one input -> PCM or Ogg/Opus on stdout. Exported for tests. */
-export function ffmpegArgs({ input, headers, seekSec = 0, network = false, endless = false, loudnorm = false, mode = 'pcm', volume = 100 }) {
-  const a = ['-hide_banner', '-loglevel', 'error'];
+export function ffmpegArgs({ input, headers, seekSec = 0, network = false, endless = false, loudnorm = false, mode = 'pcm', volume = 1 }) {
+  // Low CPU: one thread, modest probing (inputs are plain audio), no loudnorm unless asked.
+  const a = ['-hide_banner', '-loglevel', 'error', '-threads', '1', '-probesize', '512k', '-analyzeduration', '2000000'];
   if (input !== 'pipe:0') a.push('-nostdin');
   if (network) {
     a.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
-    if (endless) a.push('-reconnect_at_eof', '1');
+    // Endless icecast-style streams only: on HLS this would re-fetch the playlist forever instead of reading it.
+    if (endless && !/\.m3u8?(\?|$)|\/hls_playlist\/|manifest/i.test(input)) a.push('-reconnect_at_eof', '1');
     const h = { ...(headers || {}) };
     const ua = h['User-Agent'] || h['user-agent'];
     delete h['User-Agent'];
@@ -92,9 +94,10 @@ export function ffmpegArgs({ input, headers, seekSec = 0, network = false, endle
   a.push('-i', input, '-vn', '-sn', '-dn');
   const filters = [];
   if (loudnorm) filters.push('loudnorm=I=-16:TP=-1.5:LRA=11');
-  if (mode === 'opus' && Number.isFinite(volume) && volume !== 100) filters.push(`volume=${(Math.max(0, volume) / 100).toFixed(3)}`);
-  if (filters.length) a.push('-af', filters.join(','));
-  a.push('-ar', '48000', '-ac', '2');
+  const gain = volume > 5 ? volume / 100 : volume; // a factor (0.6 = 60 %); tolerate percent values too
+  if (mode === 'opus' && Number.isFinite(gain) && Math.abs(gain - 1) > 0.001) filters.push(`volume=${Math.max(0, gain).toFixed(3)}`);
+  if (filters.length) a.push('-af', filters.join(','), '-filter_threads', '1');
+  a.push('-threads', '1', '-ar', '48000', '-ac', '2');
   if (mode === 'opus') a.push('-c:a', 'libopus', '-b:a', '96k', '-vbr', 'on', '-frame_duration', '20', '-application', 'audio', '-f', 'ogg', 'pipe:1');
   else a.push('-f', 's16le', 'pipe:1');
   return a;
@@ -175,14 +178,14 @@ async function ytdlpSourceStream(track, { seek, signal, out }) {
   if (!pageUrl) throw new SourceError('UNSUPPORTED', `no url for ${track.id}`);
   for (let attempt = 0; attempt < 2; attempt++) {
     const info = await streamInfo(pageUrl, { signal, fresh: attempt > 0 });
-    if (!DIRECT_PROTOCOLS.has(String(info.protocol).split('+')[0])) {
+    if (out.forcePipe || !DIRECT_PROTOCOLS.has(String(info.protocol).split('+')[0])) {
       // Pipe mode: yt-dlp downloads, ffmpeg decodes stdin.
-      const ytdlpArgs = [...ytdlpBaseArgs(), '-f', 'bestaudio/best', '--no-playlist', '--quiet', '-o', '-', pageUrl];
+      const ytdlpArgs = [...ytdlpBaseArgs(), '-f', ytdlpProfile.format, '--no-playlist', '--quiet', '-o', '-', pageUrl];
       return startPipeline({ ffArgs: ffmpegArgs({ ...out, input: 'pipe:0', seekSec: seek }), ytdlpArgs, signal });
     }
     try {
       return await startPipeline({
-        ffArgs: ffmpegArgs({ ...out, input: info.url, headers: info.headers, network: true, endless: info.isLive, seekSec: info.isLive ? 0 : seek }),
+        ffArgs: ffmpegArgs({ ...out, input: info.url, headers: info.headers, network: true, seekSec: info.isLive ? 0 : seek }),
         signal,
       });
     } catch (e) {
@@ -218,19 +221,21 @@ async function soundcloudFallback(track, signal) {
 
 /**
  * @param {import('./track.js').Track} track
- * @param {{seekSec?: number, volume?: number, signal?: AbortSignal, loudnorm?: boolean, mode?: 'pcm'|'opus'}} [opts]
- *   volume: percent (100 = unchanged). Applied by ffmpeg only in opus mode; in pcm mode use inlineVolume.
+ * @param {{seekSec?: number, volume?: number, signal?: AbortSignal, loudnorm?: boolean, mode?: 'pcm'|'opus', forcePipe?: boolean}} [opts]
+ *   volume: factor (1 = unchanged, 0.6 = 60 %). Applied by ffmpeg only for ogg/opus output; raw output ignores it
+ *   (the player uses inlineVolume).
+ *   forcePipe: always use yt-dlp -o - | ffmpeg (tests/debugging).
  * @returns {Promise<{stream: import('node:stream').Readable, type: 'raw'|'ogg/opus', kill: () => void,
- *                    fallback?: 'soundcloud', fallbackTrack?: import('./track.js').Track}>}
+ *                    fallback?: 'soundcloud', fallbackFrom?: 'youtube', fallbackTrack?: import('./track.js').Track}>}
  */
-export async function createStream(track, { seekSec = 0, volume = 100, signal, loudnorm = false, mode = config.audioMode } = {}) {
+export async function createStream(track, { seekSec = 0, volume = 1, signal, loudnorm = false, mode = config.audioMode, forcePipe = false } = {}) {
   try {
     await ensureTools();
   } catch (e) {
     throw new SourceError('TOOL_MISSING', e.message);
   }
   const seek = track.isLive ? 0 : Math.max(0, Math.floor(seekSec || 0));
-  const out = { mode, volume, loudnorm };
+  const out = { mode, volume, loudnorm, forcePipe };
   const type = mode === 'opus' ? 'ogg/opus' : 'raw';
 
   if (track.source === 'local') {
@@ -255,9 +260,8 @@ export async function createStream(track, { seekSec = 0, volume = 100, signal, l
     const sc = await soundcloudFallback(track, signal).catch(() => null);
     if (!sc) throw e;
     const h = await ytdlpSourceStream(sc, { seek, signal, out });
-    track.fallback = 'soundcloud';
-    track.fallbackTrack = sc;
-    return { ...h, type, fallback: 'soundcloud', fallbackTrack: sc };
+    Object.assign(track, { fallback: 'soundcloud', fallbackFrom: 'youtube', fallbackTrack: sc });
+    return { ...h, type, fallback: 'soundcloud', fallbackFrom: 'youtube', fallbackTrack: sc };
   }
 }
 

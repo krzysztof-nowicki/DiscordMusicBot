@@ -26,8 +26,20 @@ export const config = {
   ytdlpCookiesB64: env('YTDLP_COOKIES_B64'),
   ytFallback: env('YT_FALLBACK', 'soundcloud') === 'none' ? 'none' : 'soundcloud',
   audioMode: (env('AUDIO_MODE', process.platform === 'win32' ? 'pcm' : 'opus') === 'pcm') ? 'pcm' : 'opus',
-  idleLeaveMin: num('IDLE_LEAVE_MIN', 5),
-  aloneLeaveMin: num('ALONE_LEAVE_MIN', 3),
+  // Resource limits (small cloud instances): every value is an env var of the same name in UPPER_SNAKE_CASE.
+  limits: {
+    aloneLeaveMin: num('ALONE_LEAVE_MIN', 3), // alone in the channel: pause at once, leave after N min
+    idleLeaveMin: num('IDLE_LEAVE_MIN', 5), // nothing playing: leave after N min
+    pauseLeaveMin: num('PAUSE_LEAVE_MIN', 10), // paused: leave after N min
+    pauseKillSec: num('PAUSE_KILL_SEC', 60), // paused: kill ffmpeg/yt-dlp after N s (resume re-creates with seek)
+    maxActivePlayers: num('MAX_ACTIVE_PLAYERS', process.platform === 'win32' ? 10 : 3),
+    npUpdateSec: num('NP_UPDATE_SEC', 30), // now-playing progress edit interval (only while playing)
+    prefetchLeadSec: num('PREFETCH_LEAD_SEC', 20), // warm up the next track this long before the end
+    maxPlaylist: num('MAX_PLAYLIST', 200), // tracks taken from one playlist/album/folder
+    maxQueue: num('MAX_QUEUE', 500),
+    playRateCount: num('PLAY_RATE_COUNT', 5), // per-user /play rate limit: N requests ...
+    playRateWindowSec: num('PLAY_RATE_WINDOW_SEC', 10), // ... per this many seconds
+  },
   port: num('PORT', 0),
   dataDir: path.resolve(ROOT, env('DATA_DIR', 'data')),
   binDir: path.resolve(ROOT, env('BIN_DIR', 'bin')),
