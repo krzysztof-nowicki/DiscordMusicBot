@@ -54,7 +54,7 @@ Join a voice channel first. The bot joins *your* channel.
 | `/play query: https://music.youtube.com/watch?v=...` | YouTube Music works too |
 | `/play query: https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC` | reads the Spotify song and plays the same song from YouTube |
 | `/play query: https://open.spotify.com/album/...` | queues the whole album |
-| `/play query: https://open.spotify.com/playlist/...` | queues the playlist (very long playlists need Spotify keys; see the notes) |
+| `/play query: https://open.spotify.com/playlist/...` | queues the playlist, **up to its first 100 songs** (a Spotify limit since Feb 2026, even with Spotify keys) |
 | `/play query: https://soundcloud.com/artist/track` | SoundCloud track or set |
 | `/play query: https://artist.bandcamp.com/track/...` | Bandcamp |
 | `/play query: https://stream.example.com/radio.mp3` | internet radio or any direct audio link (plays until you skip) |

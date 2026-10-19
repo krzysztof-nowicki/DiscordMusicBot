@@ -212,6 +212,24 @@ test('Opus mode produces Ogg/Opus (local + YouTube), volume filter accepted', as
   assert.equal(rb.head.toString('latin1'), 'OggS');
 });
 
+test('YouTube bot check -> SoundCloud fallback (simulated bot check)', async () => {
+  process.env.SOURCES_SIMULATE_BOT_CHECK = '1';
+  try {
+    const t = makeTrack({ id: 'yt:AAAAAAAAAAA', title: 'Forss - Flickermood (Official Audio)', artist: 'Forss', durationSec: 214, source: 'youtube', url: 'https://www.youtube.com/watch?v=AAAAAAAAAAA' });
+    const t0 = Date.now();
+    const h = await createStream(t, { mode: 'pcm' });
+    const res = await take(h, 3 * BPS, t0);
+    timings.push({ name: 'bot check -> soundcloud', resolveMs: '-', firstPcmMs: res.firstMs, title: `${h.fallbackTrack.artist} - ${h.fallbackTrack.title}` });
+    assert.equal(h.fallback, 'soundcloud');
+    assert.equal(h.fallbackFrom, 'youtube');
+    assert.equal(t.fallbackFrom, 'youtube');
+    assert.equal(t.fallbackTrack.source, 'soundcloud');
+    assert.ok(res.bytes >= 3 * BPS);
+  } finally {
+    delete process.env.SOURCES_SIMULATE_BOT_CHECK;
+  }
+});
+
 test('kill() leaves no orphan yt-dlp/ffmpeg processes', async () => {
   const yt = (await resolve('https://www.youtube.com/watch?v=dQw4w9WgXcQ')).tracks[0];
   const local = makeTrack({ id: `local:${longMp3}`, title: 'x', source: 'local', streamUrl: longMp3 });

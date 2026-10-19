@@ -22,6 +22,21 @@ _Requested 2026-10-19: a music bot that plays from YouTube, Spotify, any other s
 - Agents: S and P resumed. A research agent is checking Northflank's free-tier limits, the UI steps, UDP, and YouTube from datacenter IPs.
 - The lead writes the docs once the research is in: README.md (local), DEPLOY_NORTHFLANK.md (step by step) and USAGE.md (Discord: invite + every command with URL/file/choice examples).
 
+### Progress (session 2)
+- [x] **P**, player: 40 tests. Every resource limit is in place (alone/idle/pause-kill/pause-leave, max players, rate limit,
+  rare now-playing edits). Dockerfile + healthcheck done.
+- [x] **S**, sources: 49 offline + 16 live tests, verified on Windows and WSL Ubuntu.
+  - yt-dlp uses node as its JS runtime (no Deno in the image).
+  - Spotify playlists are capped at 100 songs (a Spotify change from Feb 2026).
+  - SoundCloud fallback when YouTube runs a bot check.
+- [x] Docs: README.md, USAGE.md (every command, checked against the code), DEPLOY_NORTHFLANK.md and .env.example.
+- [x] The Docker image builds (56 s, 1.19 GB). At 0.2 CPU / 512 MB the RSS is 50–90 MB.
+- [ ] **BUG being fixed by S:** in the container, `createStream` yields 0 bytes (no error). yt-dlp and ffmpeg work there
+  when run by hand, so the bug is in stream.js spawn/pipe on Linux-in-Docker. The repro script is in the job temp
+  folder, and the fix comes with a docker test script.
+- [ ] Verifier review running (bugs + doc mismatches); apply its fixes.
+- [ ] Final: rebuild the image, run the container test under limits, commit on main, stop Docker Desktop.
+
 ## Paused 2026-10-19 (session limit), earlier resume notes
 The two implementer agents (S = sources, P = player) were stopped mid-work. Their code was committed as a WIP on `main`.
 **Only `main`, never other branches** (the user's rule).

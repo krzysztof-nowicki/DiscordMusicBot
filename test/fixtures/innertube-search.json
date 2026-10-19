@@ -1,0 +1,193 @@
+{
+ "contents": {
+  "twoColumnSearchResultsRenderer": {
+   "primaryContents": {
+    "sectionListRenderer": {
+     "contents": [
+      {
+       "itemSectionRenderer": {
+        "contents": [
+         {
+          "videoRenderer": {
+           "videoId": "Fg_AkYeZcNM",
+           "title": {
+            "runs": [
+             {
+              "text": "Great Grey Wolf Sif"
+             }
+            ]
+           },
+           "lengthText": {
+            "simpleText": "3:23"
+           },
+           "ownerText": {
+            "runs": [
+             {
+              "text": "Motoi Sakuraba - Topic"
+             }
+            ]
+           }
+          }
+         },
+         {
+          "videoRenderer": {
+           "videoId": "Li8JmrKwlzw",
+           "title": {
+            "runs": [
+             {
+              "text": "Dark Souls: Remastered - Great Grey Wolf Sif Alternate Cutscene & Fight [1080p/60fps]"
+             }
+            ]
+           },
+           "lengthText": {
+            "simpleText": "2:19"
+           },
+           "ownerText": {
+            "runs": [
+             {
+              "text": "Ranwolve"
+             }
+            ]
+           }
+          }
+         },
+         {
+          "videoRenderer": {
+           "videoId": "y6TOL0e0dLI",
+           "title": {
+            "runs": [
+             {
+              "text": "Dark Souls: Great Grey Wolf Sif Boss Fight (4K 60fps)"
+             }
+            ]
+           },
+           "lengthText": {
+            "simpleText": "3:14"
+           },
+           "ownerText": {
+            "runs": [
+             {
+              "text": "Boss Fight Database"
+             }
+            ]
+           },
+           "ownerBadges": [
+            {
+             "metadataBadgeRenderer": {
+              "style": "BADGE_STYLE_TYPE_VERIFIED"
+             }
+            }
+           ]
+          }
+         },
+         {
+          "videoRenderer": {
+           "videoId": "Hccm96qZ474",
+           "title": {
+            "runs": [
+             {
+              "text": "Great Wolf Sif Boss Guide - Dark Souls Remastered"
+             }
+            ]
+           },
+           "lengthText": {
+            "simpleText": "2:51"
+           },
+           "ownerText": {
+            "runs": [
+             {
+              "text": "Fextralife"
+             }
+            ]
+           },
+           "ownerBadges": [
+            {
+             "metadataBadgeRenderer": {
+              "style": "BADGE_STYLE_TYPE_VERIFIED"
+             }
+            }
+           ]
+          }
+         },
+         {
+          "videoRenderer": {
+           "videoId": "DIicTozhr7U",
+           "title": {
+            "runs": [
+             {
+              "text": "Dark Souls OST - Great Grey Wolf Sif [Extended]"
+             }
+            ]
+           },
+           "lengthText": {
+            "simpleText": "31:51"
+           },
+           "ownerText": {
+            "runs": [
+             {
+              "text": "TOMITO"
+             }
+            ]
+           }
+          }
+         },
+         {
+          "videoRenderer": {
+           "videoId": "L2lvOQjiD0Y",
+           "title": {
+            "runs": [
+             {
+              "text": "The Training of Sif continues"
+             }
+            ]
+           },
+           "lengthText": {
+            "simpleText": "0:32"
+           },
+           "ownerText": {
+            "runs": [
+             {
+              "text": "Erynith"
+             }
+            ]
+           }
+          }
+         },
+         {
+          "videoRenderer": {
+           "videoId": "jfKfPfyJRdk",
+           "title": {
+            "runs": [
+             {
+              "text": "lofi hip hop radio - beats to relax/study to"
+             }
+            ]
+           },
+           "ownerText": {
+            "runs": [
+             {
+              "text": "Lofi Girl"
+             }
+            ]
+           },
+           "badges": [
+            {
+             "metadataBadgeRenderer": {
+              "style": "BADGE_STYLE_TYPE_LIVE_NOW"
+             }
+            }
+           ]
+          }
+         },
+         {
+          "adSlotRenderer": {}
+         }
+        ]
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

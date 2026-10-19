@@ -29,6 +29,7 @@ export function scoreCandidate(cand, want) {
   const coreTitle = want.title.replace(/[([].*?[)\]]/g, ' ').replace(/\s+-\s+.*$/, '');
   const titleCov = tokenCoverage(tokens(coreTitle).length ? coreTitle : want.title, artistTokens.length ? tokens(cand.title) : hay);
   s += 50 * titleCov;
+  if (titleCov < 0.5) s -= 50; // a different song, however well artist and length agree
   // Extra candidate words beyond artist + title (noise) cost a little.
   const wantAll = new Set([...tokens(want.title), ...artistTokens]);
   const extra = tokens(cand.title).filter((t) => !wantAll.has(t) && !['official', 'audio', 'video', 'music', 'lyrics', 'lyric', 'hd', 'hq', '4k', 'remastered', 'remaster', 'ft', 'feat', 'mv', 'topic', 'visualizer'].includes(t));

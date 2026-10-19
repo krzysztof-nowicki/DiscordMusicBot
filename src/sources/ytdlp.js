@@ -19,6 +19,10 @@ const RETRYABLE = new Set(['BOT_CHECK', 'UNAVAILABLE', 'STREAM_FAILED', 'NETWORK
 const isYoutubeArg = (args) => args.some((a) => /youtube\.com|youtu\.be|^ytsearch\d*:/.test(a));
 
 async function ytdlpJsonOnce(args, { timeoutMs, signal, errCode, retry }) {
+  // Test hook: behave like a datacenter IP that YouTube bot-checks (live test of the SoundCloud fallback).
+  if (process.env.SOURCES_SIMULATE_BOT_CHECK === '1' && isYoutubeArg(args)) {
+    throw ytdlpError("ERROR: [youtube] simulated: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies");
+  }
   const r = await run(tools.ytdlp, [...ytdlpBaseArgs({ retry }), ...args], { timeoutMs, signal });
   if (r.aborted) throw new SourceError('STREAM_FAILED', 'aborted');
   if (r.timedOut) throw new SourceError('NETWORK', `yt-dlp timed out: ${args.join(' ')}`);

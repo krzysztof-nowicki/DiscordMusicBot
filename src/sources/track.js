@@ -30,8 +30,8 @@ export function makeTrack(t) {
   const d = Number(t.durationSec);
   const track = {
     id: String(t.id),
-    title: String(t.title || '').trim() || 'Unknown',
-    artist: t.artist ? String(t.artist).trim() : undefined,
+    title: String(t.title || '').replace(/\s+/g, ' ').trim() || 'Unknown', // \s also folds NBSP (Spotify uses it)
+    artist: t.artist ? String(t.artist).replace(/\s+/g, ' ').trim() || undefined : undefined,
     durationSec: t.isLive ? null : Number.isFinite(d) && d > 0 ? Math.round(d) : null,
     url: t.url || undefined,
     thumbnail: t.thumbnail || undefined,
