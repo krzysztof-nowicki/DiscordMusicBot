@@ -31,11 +31,23 @@ _Requested 2026-10-19: a music bot that plays from YouTube, Spotify, any other s
   - SoundCloud fallback when YouTube runs a bot check.
 - [x] Docs: README.md, USAGE.md (every command, checked against the code), DEPLOY_NORTHFLANK.md and .env.example.
 - [x] The Docker image builds (56 s, 1.19 GB). At 0.2 CPU / 512 MB the RSS is 50–90 MB.
-- [ ] **BUG being fixed by S:** in the container, `createStream` yields 0 bytes (no error). yt-dlp and ffmpeg work there
-  when run by hand, so the bug is in stream.js spawn/pipe on Linux-in-Docker. The repro script is in the job temp
-  folder, and the fix comes with a docker test script.
-- [ ] Verifier review running (bugs + doc mismatches); apply its fixes.
-- [ ] Final: rebuild the image, run the container test under limits, commit on main, stop Docker Desktop.
+- [x] Fixed the zero-byte stream bug. The cause was a pause+unshift that blocked `on('data')`; it now returns a
+  PassThrough. Regression tests added.
+- [x] Fresh-context review: 10 bugs plus 8 doc mismatches, all fixed with regression tests. The bugs included:
+  - arbitrary local file read via an absolute path or UNC;
+  - an endless m3u loop;
+  - abort on skip;
+  - volume or pause while a stream is opening;
+  - player slot leak;
+  - zombies (tini added);
+  - EACCES data-dir fallback;
+  - DAVE recreate;
+  - the SoundCloud note.
+- [x] Final verification: `npm test` 64/64, `npm run test:live` 17/17, `npm run test:docker` 29/29.
+  - Container at `--cpus=0.2 --memory=512m`: first YouTube audio after 5.7–11 s, radio/local 0.3 s.
+  - Peak memory about 309 MiB, node RSS about 90 MB.
+- [ ] User: test on real Discord (needs the token), then deploy to Northflank (DEPLOY_NORTHFLANK.md). Not testable here:
+  real Discord voice and Northflank outbound UDP.
 
 ## Paused 2026-10-19 (session limit), earlier resume notes
 The two implementer agents (S = sources, P = player) were stopped mid-work. Their code was committed as a WIP on `main`.

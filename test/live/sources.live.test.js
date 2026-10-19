@@ -58,7 +58,9 @@ function procTable() {
       try {
         const st = fs.readFileSync(`/proc/${d}/stat`, 'utf8');
         const close = st.lastIndexOf(')');
-        rows.push({ pid: +d, ppid: +st.slice(close + 2).split(' ')[1], name: st.slice(st.indexOf('(') + 1, close) });
+        const [state, ppid] = st.slice(close + 2).split(' ');
+        // A zombie (Z) is already dead; it only lingers when PID 1 doesn't reap (no tini/init in the container).
+        if (state !== 'Z') rows.push({ pid: +d, ppid: +ppid, name: st.slice(st.indexOf('(') + 1, close) });
       } catch {}
     }
     return rows;

@@ -23,5 +23,6 @@ const limits = [];
 if (opt('cpus')) limits.push(`--cpus=${opt('cpus')}`);
 if (opt('memory')) limits.push(`--memory=${opt('memory')}`);
 const files = argv.includes('--offline-only') ? ['test/sources.test.js'] : ['test/sources.test.js', 'test/live/sources.live.test.js'];
-process.exit(docker(['run', '--rm', ...limits, '-v', `${path.join(root, 'test')}:/app/test:ro`, '-w', '/app', '--entrypoint', 'node',
-  image, '--test', '--test-concurrency=1', ...files]));
+// Keep the image's ENTRYPOINT (tini as PID 1 reaps orphaned children, like in production); only the command changes.
+process.exit(docker(['run', '--rm', ...limits, '-v', `${path.join(root, 'test')}:/app/test:ro`, '-w', '/app',
+  image, 'node', '--test', '--test-concurrency=1', ...files]));

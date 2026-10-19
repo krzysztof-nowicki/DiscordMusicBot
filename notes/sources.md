@@ -17,9 +17,22 @@ Last update: 2026-10-19. Owner files: `src/sources/**`, `src/tools.js`, `test/so
 - `detect.js` (pure), `resolve.js` (resolve + search), `youtube.js` (innertube search, yt-dlp fallback),
   `ytdlp.js` (JSON, flat playlists, stream info, error mapping, SoundCloud search), `spotify.js` (embed + API +
   matching), `match.js` (scoring), `local.js` (library), `stream.js` (createStream/prefetch), `util.js`.
-- Tests: `npm test` 49/49 (9 mine), `npm run test:live` 16/16 on Windows and on Linux (WSL Ubuntu 22.04).
+- Tests: `npm test` 64/64 (12 mine), `npm run test:live` 17/17 on Windows; `npm run test:docker` (offline + live
+  inside the built image, test/ mounted read-only, tini entrypoint kept) 29/29.
 - `setup-tools.ps1`: `Install-MusicBotTools [-WithDeno] [-BinDir]` (dot-source or run). Tested: fresh download,
   update and dot-sourced.
+- Fixed 2026-10-19: createStream returned an explicitly paused stream (pause + unshift), so a plain `on('data')`
+  consumer got 0 bytes (pipe/for-await were fine). It now returns a PassThrough. Regression test: "every consumer style".
+- Hardening: local files only inside MUSIC_DIR (realpath) or createLibrary/allowLocalRoot roots, audio extensions only,
+  UNC refused (detect kind 'unsupported'); radio playlists followed at most 2 levels with a 256 KB body cap; AbortSignal
+  honoured by Slots.acquire (queued waiters leave), run(), ytdlpJson, resolve, createStream (code 'ABORTED');
+  `--` before every yt-dlp URL/search argument.
+
+## Measured in the container (--cpus=0.2 --memory=512m, opus)
+- A YouTube yt-dlp extraction takes ~11 s (PyInstaller one-file start + JS challenge); then first 40 KB arrives in
+  0.3–0.8 s. Radio 0.3 s, local 0.3 s, SoundCloud resolve 4.5 s. ensureTools at startup 7.8 s (includes `-U`).
+- Peak container memory ~309 MiB (docker stats, sampled); node RSS 84–90 MB.
+- Idea: yt-dlp as a Python zipapp (needs python3 in the image) would skip the one-file unpack on every call.
 
 ## Next / open
 - Real Northflank run: confirm whether YouTube bot-checks the datacenter IP; tune YTDLP_EXTRACTOR_ARGS / cookies.
@@ -48,4 +61,5 @@ Last update: 2026-10-19. Owner files: `src/sources/**`, `src/tools.js`, `test/so
 - SomaFM refused our IP (302 to alert.mp3, 403); Radio Paradise / FIP are used in tests.
 - The johnvansickle static ffmpeg segfaults on DNS (exit 139) under glibc; use Debian's apt ffmpeg or BtbN builds.
 - Flat SoundCloud set entries have no titles, so sets get a full `-J` extraction (~3.5 s for 6 tracks).
+- In a container without an init, orphaned children become zombies under PID 1 (node). Use tini (the Dockerfile does).
 - music-metadata pinned to 11.16.1 (12.x was days old on 2026-10-19).

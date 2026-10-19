@@ -114,7 +114,9 @@ stay well under 512 MB. In a test with the same limits (0.2 CPU / 512 MB) it use
 ## 9. First test in Discord (it also proves UDP voice works)
 1. Join a voice channel on your server.
 2. Type `/play` and choose the **query** option, e.g. `never gonna give you up`.
-3. You should hear music within a few seconds and see a **Now playing** card with buttons.
+3. You should hear music and see a **Now playing** card with buttons. On the 0.2-vCPU plan, the **first YouTube song
+   takes about 6–11 s** to start, because yt-dlp has to work out the stream URL on a tiny CPU. Radio, uploaded files
+   and local files start in under a second. Later songs start faster, because the next one is prepared 20 s ahead.
 4. If the bot joins but you hear nothing, check the logs. If `[voice] stuck while connecting` or
    `voice join failed: …` keeps repeating, outbound UDP is probably blocked on this host. In that case run the bot
    on your PC (README.md) or on another host.
