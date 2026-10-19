@@ -6,7 +6,8 @@ import { makeTrack, SourceError } from './track.js';
 export function ytdlpError(stderr, fallback = 'STREAM_FAILED') {
   const s = String(stderr || '');
   let code = fallback;
-  if (/confirm your age|age[- ]restricted|inappropriate for some users/i.test(s)) code = 'AGE_RESTRICTED';
+  if (/not a bot|rate-limited by YouTube/i.test(s)) code = 'BOT_CHECK';
+  else if (/confirm your age|age[- ]restricted|inappropriate for some users/i.test(s)) code = 'AGE_RESTRICTED';
   else if (/private video|video unavailable|has been removed|not available in your country|members-only|This video is not available|404: Not Found|HTTP Error 404|recording is not available/i.test(s)) code = 'UNAVAILABLE';
   else if (/Unsupported URL|No video formats|is not a valid URL/i.test(s)) code = 'UNSUPPORTED';
   else if (/timed out|getaddrinfo|Connection reset|Temporary failure|HTTP Error 5\d\d|Unable to download/i.test(s)) code = 'NETWORK';
@@ -97,4 +98,16 @@ export async function ytdlpStreamInfo(pageUrl, { signal } = {}) {
     expiresAt,
     info,
   };
+}
+
+/** SoundCloud search via yt-dlp "scsearchN:" (~2 s). */
+export async function soundcloudSearch(q, limit, signal) {
+  const info = await ytdlpJson(['--flat-playlist', '-J', `scsearch${limit}:${q}`], { timeoutMs: 20_000, signal, errCode: 'NOT_FOUND' });
+  return (info.entries || []).filter((e) => e?.id).map((e) => entryToTrack({ ...e, title: e.title || slugTitle(e.url) }, 'soundcloud'));
+}
+
+/** "https://soundcloud.com/x/world-on-fire-1" -> "World On Fire" (titles missing from flat SoundCloud entries). */
+export function slugTitle(url) {
+  const s = decodeURIComponent(String(url || '').split('/').filter(Boolean).pop() || '');
+  return s.replace(/-\d+$/, '').replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim() || 'SoundCloud';
 }

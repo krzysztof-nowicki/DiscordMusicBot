@@ -1,5 +1,11 @@
-// External tools: yt-dlp (downloaded into bin/ and self-updated once a day), deno (yt-dlp's JS runtime for
-// YouTube's signature/n challenges, required since yt-dlp 2025.11), ffmpeg (PATH / FFMPEG_PATH / common dirs).
+// External tools (Windows and Linux):
+//  - yt-dlp: YTDLP_PATH, else BIN_DIR/yt-dlp[.exe] (downloaded from GitHub if missing), else PATH. Self-updated with
+//    `-U` at most once a day when the binary is writable (YouTube breaks old versions quickly).
+//  - deno: yt-dlp's JS runtime for YouTube's signature/n challenges (needed since yt-dlp 2025.11; EJS scripts are
+//    bundled in the yt-dlp binaries). DENO_PATH, BIN_DIR/deno, PATH, else downloaded; node is the fallback runtime.
+//  - ffmpeg/ffprobe: FFMPEG_PATH, PATH, common Windows dirs.
+//  - cookies: YTDLP_COOKIES_B64 or YTDLP_COOKIES -> private 0600 temp copy (yt-dlp rewrites its cookie file).
+// All yt-dlp flags live in ytdlpProfile / ytdlpBaseArgs() below.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -9,23 +15,75 @@ import { config } from './config.js';
 
 const WIN = process.platform === 'win32';
 const EXE = WIN ? '.exe' : '';
-const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
-const DENO_URL = 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip';
+const ARM = process.arch === 'arm64';
+const GH = 'https://github.com';
+const YTDLP_ASSET = WIN ? 'yt-dlp.exe' : process.platform === 'darwin' ? 'yt-dlp_macos' : ARM ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux';
+const DENO_ASSET = WIN ? 'deno-x86_64-pc-windows-msvc.zip'
+  : process.platform === 'darwin' ? (ARM ? 'deno-aarch64-apple-darwin.zip' : 'deno-x86_64-apple-darwin.zip')
+  : ARM ? 'deno-aarch64-unknown-linux-gnu.zip' : 'deno-x86_64-unknown-linux-gnu.zip';
 const DENO_MIN = [2, 3];
 const UPDATE_EVERY_MS = 24 * 3600 * 1000;
 const STATE_FILE = path.join(config.dataDir, 'tools.json');
 
-/** Resolved tool paths. `deno` may be null (then node itself is used as yt-dlp's JS runtime). */
-export const tools = { ytdlp: null, deno: null, ffmpeg: null, ytdlpVersion: null };
+const envList = (k) => {
+  const v = (process.env[k] ?? '').trim();
+  if (!v) return [];
+  if (v.startsWith('[')) { try { return JSON.parse(v).map(String); } catch {} }
+  return v.split(/\s+/);
+};
+
+/**
+ * The one place for yt-dlp tuning (env-overridable, so cloud deploys can change flags without a rebuild):
+ *  YTDLP_JS_RUNTIME     auto (deno if found, else node) | deno | node
+ *  YTDLP_EXTRACTOR_ARGS e.g. "youtube:player_client=default,mweb"  (JSON array for several)
+ *  YTDLP_EXTRA_ARGS     extra raw args, whitespace-separated or a JSON array
+ */
+export const ytdlpProfile = {
+  jsRuntime: (process.env.YTDLP_JS_RUNTIME || 'auto').trim().toLowerCase(),
+  extractorArgs: (() => {
+    const v = (process.env.YTDLP_EXTRACTOR_ARGS ?? '').trim();
+    if (!v) return [];
+    if (v.startsWith('[')) { try { return JSON.parse(v).map(String); } catch {} }
+    return [v];
+  })(),
+  extraArgs: envList('YTDLP_EXTRA_ARGS'),
+};
+
+/** Resolved tools. `deno` may be null (node is then yt-dlp's JS runtime); `ffprobe` and `cookies` are optional. */
+export const tools = { ytdlp: null, ytdlpVersion: null, deno: null, ffmpeg: null, ffprobe: null, cookies: null };
 
 const log = (...a) => console.log('[tools]', ...a);
+
+/**
+ * spawn() for tool processes. On Linux the child leads its own process group so killTree() can take down
+ * everything it started (yt-dlp -> ffmpeg/deno helpers).
+ */
+export function spawnTool(cmd, args, opts = {}) {
+  return spawn(cmd, args, { windowsHide: true, detached: !WIN, ...opts });
+}
+
+/** Kill a child and all its descendants (taskkill /T on Windows, the process group on Linux). Idempotent. */
+export function killTree(child) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (WIN) {
+    // The one-file yt-dlp.exe (PyInstaller) runs its work in a child process that a plain kill would orphan.
+    try {
+      const k = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      k.on('error', () => { try { child.kill(); } catch {} });
+    } catch {
+      try { child.kill(); } catch {}
+    }
+    return;
+  }
+  try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
+}
 
 /** Run a process to completion. Kills the whole tree on timeout/abort. */
 export function run(cmd, args, { timeoutMs = 60_000, signal } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawnTool(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
       return reject(e);
     }
@@ -46,26 +104,11 @@ export function run(cmd, args, { timeoutMs = 60_000, signal } = {}) {
   });
 }
 
-/**
- * Kill a child and all its descendants. Needed on Windows: the one-file yt-dlp.exe (PyInstaller) runs the real
- * work in a child process that survives a plain TerminateProcess of the parent.
- */
-export function killTree(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null || !child.pid) return;
-  if (WIN) {
-    try {
-      const k = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-      k.on('error', () => { try { child.kill(); } catch {} });
-    } catch {
-      try { child.kill(); } catch {}
-    }
-  } else {
-    try { child.kill('SIGKILL'); } catch {}
-  }
-}
-
 async function exists(p) {
   try { await fsp.access(p); return true; } catch { return false; }
+}
+async function writable(p) {
+  try { await fsp.access(p, fs.constants.W_OK); await fsp.access(path.dirname(p), fs.constants.W_OK); return true; } catch { return false; }
 }
 
 async function readState() {
@@ -76,13 +119,13 @@ async function writeState(s) {
   await fsp.writeFile(STATE_FILE, JSON.stringify(s, null, 2));
 }
 
-async function download(url, dest) {
+async function download(url, dest, mode = 0o755) {
   log('downloading', url);
-  const res = await fetch(url, { redirect: 'follow', headers: { 'user-agent': 'discord-music-bot' } });
+  const res = await fetch(url, { redirect: 'follow', headers: { 'user-agent': 'discord-music-bot' }, signal: AbortSignal.timeout(300_000) });
   if (!res.ok) throw new Error(`download ${url}: HTTP ${res.status}`);
   const tmp = `${dest}.part`;
   await fsp.mkdir(path.dirname(dest), { recursive: true });
-  await fsp.writeFile(tmp, Buffer.from(await res.arrayBuffer()));
+  await fsp.writeFile(tmp, Buffer.from(await res.arrayBuffer()), { mode });
   await fsp.rename(tmp, dest);
 }
 
@@ -96,21 +139,25 @@ async function version(cmd, args = ['--version']) {
 }
 
 async function ensureYtdlp(state, { update }) {
-  const p = config.ytdlpPath;
-  const ours = path.resolve(path.dirname(p)) === path.resolve(config.binDir);
-  if (!(await exists(p))) {
-    if (!ours || !WIN) {
-      // Custom path or non-Windows: fall back to PATH.
+  const envPath = (process.env.YTDLP_PATH ?? '').trim();
+  const p = envPath || path.join(config.binDir, `yt-dlp${EXE}`);
+  if (!envPath && !(await exists(p))) {
+    try {
+      await download(`${GH}/yt-dlp/yt-dlp/releases/latest/download/${YTDLP_ASSET}`, p);
+      state.ytdlpUpdatedAt = Date.now();
+    } catch (e) {
       const v = await version('yt-dlp');
-      if (v) return { path: 'yt-dlp', version: v };
-      throw new Error(`yt-dlp not found at ${p}`);
+      if (v) { log(`download failed (${e.message}); using yt-dlp from PATH`); return { path: 'yt-dlp', version: v }; }
+      throw e;
     }
-    await download(YTDLP_URL, p);
-    state.ytdlpUpdatedAt = Date.now();
-  } else if (update && ours && Date.now() - (state.ytdlpUpdatedAt || 0) > UPDATE_EVERY_MS) {
-    const r = await run(p, ['-U'], { timeoutMs: 90_000 }).catch((e) => ({ code: -1, stdout: '', stderr: String(e) }));
-    log('yt-dlp -U:', (r.stdout + r.stderr).trim().split(/\r?\n/).pop());
-    if (r.code === 0) state.ytdlpUpdatedAt = Date.now();
+  } else if (update && Date.now() - (state.ytdlpUpdatedAt || 0) > UPDATE_EVERY_MS) {
+    if (await writable(p)) {
+      const r = await run(p, ['-U'], { timeoutMs: 120_000 }).catch((e) => ({ code: -1, stdout: '', stderr: String(e) }));
+      log('yt-dlp -U:', (r.stdout + r.stderr).trim().split(/\r?\n/).pop());
+      if (r.code === 0) state.ytdlpUpdatedAt = Date.now();
+    } else {
+      log(`yt-dlp at ${p} is read-only; skipping self-update`);
+    }
   }
   const v = await version(p);
   if (!v) throw new Error(`yt-dlp at ${p} does not run`);
@@ -122,21 +169,29 @@ function denoOk(v) {
   return !!m && (+m[1] > DENO_MIN[0] || (+m[1] === DENO_MIN[0] && +m[2] >= DENO_MIN[1]));
 }
 
+async function unzip(zip, dir) {
+  const tries = WIN
+    ? [[path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-xf', zip, '-C', dir]]]
+    : [['unzip', ['-o', '-q', zip, '-d', dir]], ['bsdtar', ['-xf', zip, '-C', dir]], ['python3', ['-m', 'zipfile', '-e', zip, dir]]];
+  for (const [cmd, args] of tries) {
+    const r = await run(cmd, args, { timeoutMs: 120_000 }).catch(() => null);
+    if (r?.code === 0) return;
+  }
+  throw new Error('no unzip tool (unzip/bsdtar/python3)');
+}
+
 async function ensureDeno() {
   const local = path.join(config.binDir, `deno${EXE}`);
-  if (denoOk(await version(local))) return local;
-  if (denoOk(await version('deno'))) return 'deno';
-  if (!WIN) return null;
+  for (const c of [(process.env.DENO_PATH ?? '').trim(), local, 'deno'].filter(Boolean)) if (denoOk(await version(c))) return c;
+  if (ytdlpProfile.jsRuntime === 'node') return null; // not wanted: don't download 100 MB
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'deno-dl-'));
   try {
     const zip = path.join(tmpDir, 'deno.zip');
-    await download(DENO_URL, zip);
-    // Windows 10+ ships bsdtar, which extracts zip files.
-    const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
-    const r = await run(tar, ['-xf', zip, '-C', tmpDir], { timeoutMs: 120_000 });
-    if (r.code !== 0) throw new Error(`unzip deno: ${r.stderr}`);
+    await download(`${GH}/denoland/deno/releases/latest/download/${DENO_ASSET}`, zip, 0o644);
+    await unzip(zip, tmpDir);
     await fsp.mkdir(config.binDir, { recursive: true });
-    await fsp.copyFile(path.join(tmpDir, 'deno.exe'), local);
+    await fsp.copyFile(path.join(tmpDir, `deno${EXE}`), local);
+    if (!WIN) await fsp.chmod(local, 0o755);
   } finally {
     await fsp.rm(tmpDir, { recursive: true, force: true });
   }
@@ -148,9 +203,29 @@ async function findFfmpeg() {
   if (WIN) {
     cands.push('C:\\ffmpeg\\bin\\ffmpeg.exe', path.join(config.binDir, 'ffmpeg.exe'));
     if (process.env.LOCALAPPDATA) cands.push(path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'));
+  } else {
+    cands.push('/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg', path.join(config.binDir, 'ffmpeg'));
   }
-  for (const c of [...new Set(cands.filter(Boolean))]) if (await version(c, ['-version'])) return c;
+  for (const c of [...new Set(cands.filter(Boolean))]) {
+    if (!(await version(c, ['-version']))) continue;
+    const base = path.basename(c);
+    const probe = c === base ? c.replace(/ffmpeg/i, 'ffprobe') : path.join(path.dirname(c), base.replace(/ffmpeg/i, 'ffprobe'));
+    return { ffmpeg: c, ffprobe: (await version(probe, ['-version'])) ? probe : null };
+  }
   return null;
+}
+
+/** Write YTDLP_COOKIES_B64 / copy YTDLP_COOKIES into a private (0600) temp file. */
+async function prepareCookies() {
+  let data = null;
+  if (config.ytdlpCookiesB64) data = Buffer.from(config.ytdlpCookiesB64, 'base64');
+  else if (config.ytdlpCookies && (await exists(config.ytdlpCookies))) data = await fsp.readFile(config.ytdlpCookies);
+  if (!data?.length) return null;
+  const file = path.join(os.tmpdir(), `dmb-yt-cookies-${process.pid}.txt`);
+  await fsp.writeFile(file, data, { mode: 0o600 });
+  if (!WIN) await fsp.chmod(file, 0o600);
+  process.once('exit', () => { try { fs.unlinkSync(file); } catch {} });
+  return file;
 }
 
 let ensuring = null;
@@ -162,25 +237,33 @@ let ensuring = null;
 export function ensureTools(opts = {}) {
   ensuring ??= (async () => {
     const state = await readState();
-    const [y, deno, ffmpeg] = await Promise.all([
+    const [y, deno, ff, cookies] = await Promise.all([
       ensureYtdlp(state, { update: opts.update ?? true }),
       ensureDeno().catch((e) => { log('deno unavailable, using node as JS runtime:', e.message); return null; }),
       findFfmpeg(),
+      prepareCookies().catch((e) => { log('cookies:', e.message); return null; }),
     ]);
     await writeState(state).catch(() => {});
-    if (!ffmpeg) throw new Error('ffmpeg not found (install: winget install Gyan.FFmpeg, or set FFMPEG_PATH)');
-    Object.assign(tools, { ytdlp: y.path, ytdlpVersion: y.version, deno, ffmpeg });
-    log(`yt-dlp ${y.version}, deno ${deno ?? '(none, using node)'}, ffmpeg ${ffmpeg}`);
+    if (!ff) throw new Error(`ffmpeg not found (${WIN ? 'winget install Gyan.FFmpeg' : 'apt install ffmpeg'}, or set FFMPEG_PATH)`);
+    Object.assign(tools, { ytdlp: y.path, ytdlpVersion: y.version, deno, ffmpeg: ff.ffmpeg, ffprobe: ff.ffprobe, cookies });
+    log(`yt-dlp ${y.version}, js runtime ${jsRuntimeArg()}, ffmpeg ${ff.ffmpeg}${cookies ? ', cookies on' : ''}`);
     return tools;
   })();
   ensuring.catch(() => { ensuring = null; });
   return ensuring;
 }
 
-/** Common yt-dlp arguments: JS runtime for YouTube's challenges, cookies if configured. */
+function jsRuntimeArg() {
+  const want = ytdlpProfile.jsRuntime;
+  if (want !== 'node' && tools.deno) return `deno:${tools.deno}`;
+  return `node:${process.execPath}`;
+}
+
+/** Common yt-dlp arguments: JS runtime, extractor args, cookies and extra args from ytdlpProfile. */
 export function ytdlpBaseArgs() {
-  const a = ['--no-warnings', '--no-progress', '--ignore-config'];
-  a.push('--js-runtimes', tools.deno ? `deno:${tools.deno}` : `node:${process.execPath}`);
-  if (config.ytdlpCookies && fs.existsSync(config.ytdlpCookies)) a.push('--cookies', config.ytdlpCookies);
+  const a = ['--no-warnings', '--no-progress', '--ignore-config', '--js-runtimes', jsRuntimeArg()];
+  for (const x of ytdlpProfile.extractorArgs) a.push('--extractor-args', x);
+  if (tools.cookies) a.push('--cookies', tools.cookies);
+  a.push(...ytdlpProfile.extraArgs);
   return a;
 }

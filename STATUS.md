@@ -17,7 +17,12 @@ _Requested 2026-10-19: a music bot that plays from YouTube, Spotify, any other s
 - [ ] P, player and Discord (`src/index.js`, `src/player`, `src/commands`, `src/ui`): queue, loop, shuffle, seek, volume, auto-leave,
   autoplay, now-playing embed with buttons, playlists, DJ role, PL/EN messages, README, setup/start scripts.
 
-## Paused 2026-10-19 (session limit), resume here
+## Resumed 2026-10-19 (session 2), with a new requirement: run on the Northflank free plan, plus full docs
+- Contract: DESIGN.md section "Cloud: Northflank free plan". Config gained AUDIO_MODE, YTDLP_COOKIES_B64, YT_FALLBACK, PORT, DATA_DIR and BIN_DIR.
+- Agents: S and P resumed. A research agent is checking Northflank's free-tier limits, the UI steps, UDP, and YouTube from datacenter IPs.
+- The lead writes the docs once the research is in: README.md (local), DEPLOY_NORTHFLANK.md (step by step) and USAGE.md (Discord: invite + every command with URL/file/choice examples).
+
+## Paused 2026-10-19 (session limit), earlier resume notes
 The two implementer agents (S = sources, P = player) were stopped mid-work. Their code was committed as a WIP on `main`.
 **Only `main`, never other branches** (the user's rule).
 

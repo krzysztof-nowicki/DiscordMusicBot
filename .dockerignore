@@ -1,0 +1,16 @@
+.git
+.gitignore
+.idea
+.node
+node_modules
+bin
+data
+notes
+test
+*.log
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+*.ps1

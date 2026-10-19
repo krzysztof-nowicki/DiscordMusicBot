@@ -47,23 +47,25 @@ export class FakeAudioPlayer extends EventEmitter {
   }
 }
 
-export const fakeResource = (stream, track) => ({
+/** Raw resources get an inline volume; ogg/opus ones don't (like createAudioResource without inlineVolume). */
+export const fakeResource = (stream, track, type = 'raw') => ({
   stream,
   track,
+  type,
   playbackDuration: 0,
-  volume: { v: 1, setVolume(v) { this.v = v; } },
+  volume: type === 'raw' ? { v: 1, setVolume(v) { this.v = v; } } : undefined,
 });
 
 export function track(n, extra = {}) {
   return { id: `yt:${n}`, title: `Song ${n}`, artist: `Artist ${n}`, durationSec: 180, url: `https://youtu.be/${n}`, source: 'youtube', isLive: false, ...extra };
 }
 
-export function fakeSources({ failIds = [], searchResults = [], mix = null } = {}) {
+export function fakeSources({ failIds = [], searchResults = [], mix = null, type = 'raw', fallbackIds = [] } = {}) {
   const calls = { createStream: [], kill: [], prefetch: [], search: [], resolve: [] };
   return {
     calls,
     async createStream(tr, opts = {}) {
-      calls.createStream.push({ id: tr.id, seekSec: opts.seekSec ?? 0 });
+      calls.createStream.push({ id: tr.id, seekSec: opts.seekSec ?? 0, volume: opts.volume });
       if (failIds.includes(tr.id)) {
         const e = new Error('Ten utwór jest niedostępny.');
         e.name = 'SourceError';
@@ -71,7 +73,9 @@ export function fakeSources({ failIds = [], searchResults = [], mix = null } = {
         throw e;
       }
       const stream = new PassThrough();
-      return { stream, kill: () => calls.kill.push(tr.id) };
+      const handle = { stream, type, kill: () => calls.kill.push(tr.id) };
+      if (fallbackIds.includes(tr.id)) handle.fallbackFrom = 'youtube';
+      return handle;
     },
     async prefetch(tr) {
       calls.prefetch.push(tr.id);

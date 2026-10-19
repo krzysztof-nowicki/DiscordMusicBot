@@ -19,10 +19,13 @@ const PREFETCH_LEAD_SEC = 20; // warm up the next track this long before the cur
 const MAX_FAILURES = 3;
 const MIN_PLAYED_MS = 1000; // a track that ends sooner than this (from 0, not live, not tiny) counted as failed
 const AUTOPLAY_RECENT = 25;
+const VOLUME_RESTART_MS = 600; // ogg/opus streams bake the volume in: re-create after the slider settles
 
 export const LOOP_MODES = ['off', 'track', 'queue'];
 
-function defaultResource(stream) {
+/** 'raw' = s16le 48k stereo (volume applied here); 'ogg/opus' = already encoded by ffmpeg (volume baked in). */
+function defaultResource(stream, track, type = 'raw') {
+  if (type === 'ogg/opus') return createAudioResource(stream, { inputType: StreamType.OggOpus });
   return createAudioResource(stream, { inputType: StreamType.Raw, inlineVolume: true });
 }
 
@@ -52,7 +55,7 @@ export class GuildPlayer extends EventEmitter {
    * @param {{defaultVolume: number, idleLeaveMin: number, aloneLeaveMin: number}} o.config
    * @param {{get: (g: string) => object, set: (g: string, patch: object) => void}} [o.settings]
    * @param {any} [o.audioPlayer]  @discordjs/voice AudioPlayer (or a fake in tests)
-   * @param {(stream: any, track: any) => any} [o.createResource]
+   * @param {(stream: any, track: any, type: 'raw'|'ogg/opus') => any} [o.createResource]
    * @param {(m: string) => void} [o.log]
    */
   constructor({ guildId, sources, config, settings = null, audioPlayer, createResource = defaultResource, log = () => {} }) {
@@ -75,7 +78,8 @@ export class GuildPlayer extends EventEmitter {
     /** @type {any[]} most recent first */ this.history = [];
     /** @type {any|null} */ this.current = null;
     this.resource = null;
-    this.handle = null; // { stream, kill } of the current track
+    this.handle = null; // { stream, type, kill } of the current track
+    this.streamVolume = null; // volume baked into the current ogg/opus stream
     this.startOffset = 0; // seconds: where the current resource started (seek)
     this.token = 0;
     this.failures = 0;
@@ -87,7 +91,7 @@ export class GuildPlayer extends EventEmitter {
     this.humanCount = null;
     this.lastError = null;
     this.prefetched = new WeakSet();
-    this.timers = { idle: null, alone: null, prefetch: null };
+    this.timers = { idle: null, alone: null, prefetch: null, volume: null };
 
     this.player.on('stateChange', (oldS, newS) => {
       if (newS.status === AudioPlayerStatus.Idle && oldS.status !== AudioPlayerStatus.Idle && oldS.resource) {
@@ -272,7 +276,8 @@ export class GuildPlayer extends EventEmitter {
 
   setVolume(v) {
     this.volume = Math.max(0, Math.min(200, Math.round(v)));
-    this.resource?.volume?.setVolume(this.volume / 100);
+    if (this.resource?.volume) this.resource.volume.setVolume(this.volume / 100);
+    else if (this.current) this._scheduleVolumeRestart();
     this.settings?.set(this.guildId, { volume: this.volume });
     this.emit('update');
     return this.volume;
@@ -306,6 +311,18 @@ export class GuildPlayer extends EventEmitter {
     );
   }
 
+  /** Ogg/Opus has no inline volume: re-create the stream at the current position once changes settle. */
+  _scheduleVolumeRestart() {
+    this._clearTimer('volume');
+    this.timers.volume = this._timer(VOLUME_RESTART_MS, () => {
+      this.timers.volume = null;
+      if (!this.current || this.destroyed) return;
+      if (!this.resource) return this._scheduleVolumeRestart(); // still opening: try again shortly
+      if (this.resource.volume || this.streamVolume === this.volume) return;
+      this._start(this.current, this.current.isLive ? 0 : this.position(), { restart: true });
+    });
+  }
+
   _timer(ms, fn) {
     const h = setTimeout(fn, ms);
     h.unref?.();
@@ -323,6 +340,7 @@ export class GuildPlayer extends EventEmitter {
   _halt() {
     this.token++;
     this._clearTimer('prefetch');
+    this._clearTimer('volume');
     this.resource = null;
     const h = this.handle;
     this.handle = null;
@@ -345,8 +363,10 @@ export class GuildPlayer extends EventEmitter {
     if (this.history.length > HISTORY_MAX) this.history.length = HISTORY_MAX;
   }
 
-  async _start(track, seekSec = 0) {
+  /** @param {{restart?: boolean}} [o] restart = same track re-created (volume change): no trackStart, keep pause */
+  async _start(track, seekSec = 0, { restart = false } = {}) {
     if (this.destroyed) return;
+    const wasPaused = restart && this.manuallyPaused;
     this._halt();
     const token = this.token;
     this.current = track;
@@ -356,7 +376,7 @@ export class GuildPlayer extends EventEmitter {
 
     let handle;
     try {
-      handle = await this.sources.createStream(track, { seekSec });
+      handle = await this.sources.createStream(track, { seekSec, volume: this.volume / 100 });
     } catch (e) {
       if (token !== this.token || this.destroyed) return;
       this.log(`[player] createStream failed for ${track.id}: ${e.detail || e.message}`);
@@ -368,19 +388,22 @@ export class GuildPlayer extends EventEmitter {
       return;
     }
     this.handle = handle;
+    if (handle.fallbackFrom && !track.fallbackFrom) track.fallbackFrom = handle.fallbackFrom;
     handle.stream.on?.('error', (e) => this.log(`[player] stream error (${track.id}): ${e.message}`));
     let resource;
     try {
-      resource = this.createResource(handle.stream, track);
+      resource = this.createResource(handle.stream, track, handle.type ?? 'raw');
     } catch (e) {
       this._halt();
       this._failed(track, e);
       return;
     }
     resource.volume?.setVolume(this.volume / 100);
+    this.streamVolume = resource.volume ? null : this.volume;
     this.resource = resource;
     this.player.play(resource);
-    if (seekSec === 0) this.emit('trackStart', track);
+    if (wasPaused) this.player.pause(true);
+    if (seekSec === 0 && !restart) this.emit('trackStart', track);
     else this.emit('update');
     this._schedulePrefetch();
   }

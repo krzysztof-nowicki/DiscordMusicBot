@@ -22,18 +22,22 @@ before(() => {
   assert.equal(r.status, 0, String(r.stderr));
 });
 
-function ffmpegSources() {
+/** Like S's createStream: 'raw' = s16le PCM, 'ogg/opus' = ffmpeg encodes Opus with the volume baked in. */
+function ffmpegSources(type = 'raw') {
   const procs = [];
   return {
     procs,
-    async createStream(track, { seekSec = 0 } = {}) {
+    async createStream(track, { seekSec = 0, volume = 1 } = {}) {
       const args = ['-hide_banner', '-loglevel', 'error'];
       if (seekSec) args.push('-ss', String(seekSec));
-      args.push('-i', track.streamUrl, '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1');
+      args.push('-i', track.streamUrl);
+      if (type === 'raw') args.push('-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1');
+      else args.push('-af', `volume=${volume}`, '-c:a', 'libopus', '-b:a', '96k', '-vbr', 'on', '-frame_duration', '20', '-application', 'audio', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1');
       const proc = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
       procs.push(proc);
       return {
         stream: proc.stdout,
+        type,
         kill: () => {
           if (proc.exitCode === null && !proc.killed) proc.kill();
         },
@@ -113,5 +117,26 @@ test('skip and stop kill the running ffmpeg and do not double-advance', { skip: 
   await waitFor(() => sources.procs.every((pr) => pr.exitCode !== null || pr.signalCode), 3000, 'all ffmpeg gone');
   assert.equal(p.current, null);
   assert.deepEqual(started, ['local:tone1.mp3', 'local:tone2.mp3']);
+  p.destroy();
+});
+
+test('ogg/opus streams play as OggOpus (no inline volume) and advance on Idle', { skip: !haveFfmpeg && 'ffmpeg not found', timeout: 30_000 }, async () => {
+  const sources = ffmpegSources('ogg/opus');
+  const audio = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+  const p = new GuildPlayer({ guildId: 'e2e3', sources, config: { defaultVolume: 60, idleLeaveMin: 0, aloneLeaveMin: 0 }, audioPlayer: audio });
+  const started = [];
+  let queueEnds = 0;
+  const notices = [];
+  p.on('trackStart', (tr) => started.push(tr.id));
+  p.on('queueEnd', () => queueEnds++);
+  p.on('notice', (m) => notices.push(m));
+  p.enqueue([tone(1), tone(2)]);
+  await waitFor(() => audio.state.status === 'playing', 5000, 'playing');
+  assert.equal(p.resource.volume, undefined, 'OggOpus resource has no inline volume');
+  p.setVolume(30); // re-created at the current position after the debounce
+  await waitFor(() => sources.procs.length === 2, 3000, 'volume re-create');
+  await waitFor(() => queueEnds === 1, 10_000, 'queue end');
+  assert.deepEqual(started, ['local:tone1.mp3', 'local:tone2.mp3']);
+  assert.deepEqual(notices, []);
   p.destroy();
 });

@@ -6,6 +6,8 @@ import { SOURCE_EMOJI, UserError, addedText, clip, fmtTime, md, requireVoice, st
 export const AUTOCOMPLETE_BUDGET_MS = 2_500; // Discord drops autocomplete answers after 3 s
 const AC_CACHE_MAX = 200;
 const TOKEN_MAX = 1_000;
+export const ATTACHMENT_EXTS = ['mp3', 'flac', 'ogg', 'wav', 'm4a', 'opus', 'webm', 'mp4'];
+export const ATTACHMENT_MAX_MB = 100;
 
 /** query (lowercase) -> choices; filled even when the answer was too late for the keystroke that asked. */
 const acCache = new Map();
@@ -73,12 +75,32 @@ async function resolveQuery(query, ctx) {
   return ctx.sources.resolve(query, { limit: 1 });
 }
 
+/** Throws a UserError unless the Discord attachment looks like playable audio/video within the size limit. */
+export function checkAttachment(att) {
+  const ext = String(att.name ?? '').toLowerCase().split('.').pop();
+  const type = String(att.contentType ?? '').toLowerCase().split(';')[0].trim();
+  const typeOk = !type || /^(audio|video)\//.test(type) || type === 'application/ogg';
+  if (!ATTACHMENT_EXTS.includes(ext) || !typeOk) throw new UserError(t('badAttachment', { exts: ATTACHMENT_EXTS.join(', ') }));
+  if (att.size > ATTACHMENT_MAX_MB * 1024 * 1024) {
+    throw new UserError(t('attachmentTooBig', { size: (att.size / 1048576).toFixed(1), max: ATTACHMENT_MAX_MB }));
+  }
+}
+
 async function playCommand(interaction, ctx, next) {
-  const query = interaction.options.getString('query', true).trim();
+  const query = interaction.options.getString('query')?.trim() ?? '';
+  const att = interaction.options.getAttachment('file');
+  if (!query && !att) throw new UserError(t('needQuery'));
+  if (att) checkAttachment(att);
   requireVoice(interaction);
   await interaction.deferReply();
   const player = await ctx.manager.connect(interaction);
-  const { tracks = [], playlist } = (await resolveQuery(query, ctx)) ?? {};
+  const resolved = att
+    ? await ctx.sources.resolve(att.url, {
+        limit: 1,
+        attachment: { url: att.url, name: att.name, size: att.size, contentType: att.contentType ?? null },
+      })
+    : await resolveQuery(query, ctx);
+  const { tracks = [], playlist } = resolved ?? {};
   if (!tracks.length) throw new UserError(t('notFound'));
   const res = player.enqueue(tracks, { requestedBy: interaction.user.id, next });
   const text =
@@ -86,16 +108,18 @@ async function playCommand(interaction, ctx, next) {
   await interaction.editReply({ content: text, allowedMentions: { parse: [] } });
 }
 
-const queryOption = (o) => describe(o.setName('query'), 'opt_query').setRequired(true).setAutocomplete(true);
+// query is optional so that `file` alone works; one of them is required (checked in playCommand).
+const queryOption = (o) => describe(o.setName('query'), 'opt_query').setAutocomplete(true);
+const fileOption = (o) => describe(o.setName('file'), 'opt_file');
 
 export const play = {
-  data: describe(new SlashCommandBuilder().setName('play'), 'play').addStringOption(queryOption),
+  data: describe(new SlashCommandBuilder().setName('play'), 'play').addStringOption(queryOption).addAttachmentOption(fileOption),
   execute: (i, ctx) => playCommand(i, ctx, false),
   autocomplete: playAutocomplete,
 };
 
 export const playnext = {
-  data: describe(new SlashCommandBuilder().setName('playnext'), 'playnext').addStringOption(queryOption),
+  data: describe(new SlashCommandBuilder().setName('playnext'), 'playnext').addStringOption(queryOption).addAttachmentOption(fileOption),
   execute: (i, ctx) => playCommand(i, ctx, true),
   autocomplete: playAutocomplete,
 };

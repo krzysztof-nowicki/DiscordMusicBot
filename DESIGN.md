@@ -90,6 +90,37 @@ Behaviour:
 - **Messages:** in Polish by default (`LANG=pl|en`), short and friendly.
 - **Robustness:** one bad track never kills the queue. Log the error, post a short notice and play the next track.
 
+## Cloud: Northflank free plan (added 2026-10-19)
+
+The bot must run both locally on Windows and in a **small Linux container on Northflank's free plan**. Assume a
+fraction of a vCPU and 256–512 MB RAM until the research results arrive. Requirements:
+
+- **Cross-platform.** No Windows-only calls without a Linux branch: kill process trees with `taskkill /T` on Windows
+  and process groups (`detached` + `process.kill(-pid)`) on Linux. Tools come from env or PATH in the container.
+  `tools.js` may still self-update yt-dlp into a writable dir (`BIN_DIR`, default `bin/`), because YouTube breaks
+  old yt-dlp versions quickly.
+- **Low-CPU audio** (`AUDIO_MODE=opus|pcm`, default `opus` on Linux and `pcm` on Windows):
+  - In `opus` mode, ffmpeg encodes **Ogg/Opus** directly (`-c:a libopus -b:a 96k -vbr on -frame_duration 20
+    -application audio`). It is played as `StreamType.OggOpus`, so Node does no re-encoding.
+  - Volume in `opus` mode goes into the ffmpeg `volume` filter when the stream is created. Changing the volume
+    re-creates the stream at the current position (seek), after a short debounce.
+  - `createStream(track, {seekSec, volume, signal})` returns `{stream, type: 'raw'|'ogg/opus', kill()}`.
+- **Discord attachments:** `/play` has an optional `file` attachment option (mp3/flac/ogg/wav/m4a/opus/webm/mp4).
+  It streams from the Discord CDN URL with ffmpeg, so it works in the cloud where there is no local folder.
+  `cdn.discordapp.com` URLs pasted as text work too.
+- **Data:** `DATA_DIR` env (default `./data`). In the cloud it is ephemeral unless a volume is mounted; document this.
+  The local library uses `MUSIC_DIR`; the image includes an optional `music/` folder from the repo.
+- **YouTube from datacenter IPs** is often blocked ("Sign in to confirm you're not a bot"). Support:
+  - `YTDLP_COOKIES_B64` (base64 cookies.txt from a secret env var, written to a 0600 temp file at startup) or a
+    `YTDLP_COOKIES` path;
+  - on a bot-check error, an automatic **fallback search on SoundCloud** for the same "artist - title"
+    (`YT_FALLBACK=soundcloud|none`), with a user-visible note "(z SoundCloud)".
+- **Health:** when a `PORT` env var is set, serve `GET /health` → 200 with a JSON status (guilds, playing count,
+  uptime). This is optional and only needed if the platform requires a port.
+- **Container:** a `Dockerfile` (node:24-bookworm-slim, apt `ffmpeg ca-certificates`, `yt-dlp_linux` + deno binaries,
+  `npm ci --omit=dev`, non-root user, `CMD ["node","src/index.js"]`), plus `.dockerignore`.
+- **Shutdown:** handle SIGTERM gracefully: leave voice and kill streams.
+
 ## Config (`src/config.js`, lead)
 
 `.env`: `DISCORD_TOKEN` (required), `GUILD_ID`, `MUSIC_DIR`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `DJ_ROLE`,

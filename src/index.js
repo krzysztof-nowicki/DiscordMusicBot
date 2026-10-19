@@ -6,6 +6,7 @@ import * as sources from './sources/index.js';
 import { settings, playlists } from './store.js';
 import { PlayerManager } from './player/manager.js';
 import { commandJson, handleInteraction } from './commands/index.js';
+import { startHealthServer } from './health.js';
 
 const log = (m) => console.log(`${new Date().toISOString().slice(11, 19)} ${m}`);
 
@@ -20,12 +21,29 @@ if (!config.token) {
 }
 
 log(`voice dependency report:\n${generateDependencyReport()}`);
+log(`audio mode: ${config.audioMode}, data: ${config.dataDir}, music: ${config.musicDir}`);
 
 // Guilds + GuildVoiceStates is all a slash-command music bot needs (no privileged intents).
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 
 const manager = new PlayerManager({ sources, config, settings, log });
 const ctx = { manager, sources, config, store: { settings, playlists }, log };
+
+let health = null;
+if (config.port > 0) {
+  startHealthServer(config.port, () => ({
+    discord: client.isReady() ? 'ready' : 'connecting',
+    guilds: client.guilds.cache.size,
+    voiceConnections: manager.players.size,
+    playing: [...manager.players.values()].filter((p) => p.current && !p.paused).length,
+    audioMode: config.audioMode,
+  }))
+    .then((s) => {
+      health = s;
+      log(`health endpoint on :${config.port}/health`);
+    })
+    .catch((e) => log(`health server failed on port ${config.port}: ${e.message}`));
+}
 
 client.once(Events.ClientReady, async (c) => {
   log(`logged in as ${c.user.tag} (${c.guilds.cache.size} servers)`);
@@ -69,6 +87,7 @@ async function shutdown() {
   shuttingDown = true;
   log('shutting down');
   manager.destroyAll(); // kills every yt-dlp/ffmpeg stream and leaves voice
+  health?.close();
   await client.destroy().catch(() => {});
   setTimeout(() => process.exit(0), 500);
 }

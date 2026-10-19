@@ -124,11 +124,11 @@ test('seek recreates the stream with seekSec and position includes the offset', 
   assert.equal(p.seek(500), false, 'beyond the duration');
   assert.equal(p.seek(90), true);
   await flush();
-  assert.deepEqual(sources.calls.createStream.at(-1), { id: 'yt:1', seekSec: 90 });
+  assert.deepEqual(sources.calls.createStream.at(-1), { id: 'yt:1', seekSec: 90, volume: 0.6 });
   assert.deepEqual(sources.calls.kill, ['yt:1']);
   p.resource.playbackDuration = 5000;
   assert.equal(p.position(), 95);
-  assert.equal(p.seek(10) && true, true);
+  assert.equal(p.seek(10), true);
   const live = make();
   live.p.enqueue([track(9, { isLive: true, durationSec: null })]);
   await flush();
@@ -308,4 +308,45 @@ test('idle and alone timers make the player leave', async () => {
   await new Promise((r) => setTimeout(r, 120));
   assert.equal(alone.p.destroyed, true);
   assert.deepEqual(alone.sources.calls.kill, ['yt:1']);
+});
+
+test('ogg/opus: no inline volume; a volume change re-creates the stream at the position after a debounce', async () => {
+  const { p, audio, sources } = make({}, { type: 'ogg/opus' });
+  let starts = 0;
+  p.on('trackStart', () => starts++);
+  p.enqueue([track(1)]);
+  await flush();
+  assert.equal(p.resource.volume, undefined);
+  assert.deepEqual(sources.calls.createStream[0], { id: 'yt:1', seekSec: 0, volume: 0.6 });
+  p.resource.playbackDuration = 30_000;
+  p.pause();
+  p.setVolume(40);
+  p.setVolume(30); // debounced: one re-create for both changes
+  assert.equal(sources.calls.createStream.length, 1);
+  await new Promise((r) => setTimeout(r, 750));
+  await flush();
+  assert.equal(sources.calls.createStream.length, 2);
+  assert.deepEqual(sources.calls.createStream[1], { id: 'yt:1', seekSec: 30, volume: 0.3 });
+  assert.deepEqual(sources.calls.kill, ['yt:1']);
+  assert.equal(starts, 1, 'no new trackStart for a volume re-create');
+  assert.equal(audio.state.status, 'paused', 'pause survives the re-create');
+  assert.equal(p.position(), 30);
+});
+
+test('a volume change during the debounce is dropped when the user skips', async () => {
+  const { p, sources } = make({}, { type: 'ogg/opus' });
+  p.enqueue([track(1), track(2)]);
+  await flush();
+  p.setVolume(80);
+  p.skip();
+  await new Promise((r) => setTimeout(r, 750));
+  await flush();
+  assert.deepEqual(sources.calls.createStream.map((c) => [c.id, c.volume]), [['yt:1', 0.6], ['yt:2', 0.8]]);
+});
+
+test('fallbackFrom from the stream handle is kept on the track', async () => {
+  const { p } = make({}, { fallbackIds: ['yt:1'] });
+  p.enqueue([track(1, { source: 'soundcloud' })]);
+  await flush();
+  assert.equal(p.current.fallbackFrom, 'youtube');
 });

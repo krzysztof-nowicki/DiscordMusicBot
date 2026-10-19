@@ -79,13 +79,34 @@ export const SOURCE_EMOJI = {
   soundcloud: '🟠',
   bandcamp: '🔵',
   local: '💾',
+  attachment: '📎',
   http: '🔗',
   radio: '📻',
   generic: '🌐',
 };
 
+export const SOURCE_NAMES = {
+  youtube: 'YouTube',
+  spotify: 'Spotify',
+  soundcloud: 'SoundCloud',
+  bandcamp: 'Bandcamp',
+  local: 'local',
+  http: 'HTTP',
+  radio: 'radio',
+  generic: 'web',
+  attachment: 'Discord',
+};
+
+/** "(z SoundCloud)" when the source fell back (e.g. YouTube blocked a datacenter IP → SoundCloud match). */
+export function fallbackNote(tr) {
+  if (!tr?.fallbackFrom || tr.fallbackFrom === tr.source) return '';
+  return t('fromSource', { source: SOURCE_NAMES[tr.source] ?? tr.source });
+}
+
 export function trackLabel(tr) {
-  return tr.artist && !tr.title.toLowerCase().includes(tr.artist.toLowerCase()) ? `${tr.artist} - ${tr.title}` : tr.title;
+  const base = tr.artist && !tr.title.toLowerCase().includes(tr.artist.toLowerCase()) ? `${tr.artist} - ${tr.title}` : tr.title;
+  const note = fallbackNote(tr);
+  return note ? `${base} ${note}` : base;
 }
 
 export function clip(s, n) {

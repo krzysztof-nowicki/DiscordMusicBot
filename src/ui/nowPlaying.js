@@ -1,7 +1,7 @@
 // Now-playing embed + control buttons (edited in place), queue embed with pagination, and their button handlers.
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
 import { t } from './i18n.js';
-import { SOURCE_EMOJI, UserError, clip, controlPlayer, fmtTime, isDj, md, trackLabel } from '../commands/util.js';
+import { SOURCE_EMOJI, UserError, clip, controlPlayer, fallbackNote, fmtTime, isDj, md, trackLabel } from '../commands/util.js';
 
 const PROGRESS_EDIT_MS = 15_000; // progress bar refresh (edits are rate-limited by Discord; keep it rare)
 const MIN_EDIT_GAP_MS = 2_000; // coalesce bursts of state changes
@@ -26,7 +26,8 @@ export function nowPlayingEmbed(player, { finished = false } = {}) {
     return e.setAuthor({ name: `⏹ ${t('npFinished')}` }).setDescription(player.history[0] ? md(trackLabel(player.history[0])) : null);
   }
   const head = player.paused ? `⏸ ${t('npPaused')}` : `${SOURCE_EMOJI[tr.source] ?? '🎵'} ${t('npTitle')}`;
-  e.setAuthor({ name: head }).setTitle(clip(tr.title, 256));
+  const note = fallbackNote(tr);
+  e.setAuthor({ name: note ? `${head} ${note}` : head }).setTitle(clip(tr.title, 256));
   if (isHttp(tr.url)) e.setURL(tr.url);
   if (isHttp(tr.thumbnail)) e.setThumbnail(tr.thumbnail);
   const pos = player.position();

@@ -10,6 +10,7 @@ const SP_ID = /^[A-Za-z0-9]{22}$/;
  *   | {kind:'spotify', type:'track'|'album'|'playlist'|'artist', id:string}
  *   | {kind:'spotify-short', url:string}
  *   | {kind:'soundcloud'|'bandcamp', type:'track'|'playlist', url:string}
+ *   | {kind:'attachment', url:string}
  *   | {kind:'url', url:string}
  *   | {kind:'local', q:string}
  *   | {kind:'search', source:'youtube'|'soundcloud', q:string}} Detected
@@ -81,6 +82,7 @@ export function detect(input) {
   if (host === 'soundcloud.com' || host === 'm.soundcloud.com' || host === 'on.soundcloud.com' || host === 'api.soundcloud.com') {
     return { kind: 'soundcloud', type: parts[1] === 'sets' || parts.includes('sets') ? 'playlist' : 'track', url: u.href };
   }
+  if ((host === 'cdn.discordapp.com' || host === 'media.discordapp.net') && parts[0] === 'attachments') return { kind: 'attachment', url: u.href };
   if (host.endsWith('.bandcamp.com')) return { kind: 'bandcamp', type: parts[0] === 'track' ? 'track' : 'playlist', url: u.href };
 
   return { kind: 'url', url: u.href };
